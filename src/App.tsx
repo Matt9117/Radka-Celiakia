@@ -7,12 +7,14 @@ type EvalStatus = 'safe' | 'avoid' | 'maybe'
 export default function App() {
   // kamera
   const videoRef = useRef<HTMLVideoElement | null>(null)
-  const readerRef = useRef<BrowserMultiFormatReader | null>(null)
   const [scanning, setScanning] = useState(false)
   const [cameraId, setCameraId] = useState<string | undefined>(undefined)
   const [camError, setCamError] = useState<string | null>(null)
   const [torchOn, setTorchOn] = useState(false)
+
+  // anti-duplicačná logika
   const lastScanRef = useRef<{ code: string; at: number } | null>(null)
+  const processingRef = useRef(false) // zámok: práve spracúvame produkt => ignoruj ďalšie decode/Enter
 
   // produkt / UI
   const [barcode, setBarcode] = useState('')
@@ -25,7 +27,7 @@ export default function App() {
     try { return JSON.parse(localStorage.getItem('radka_scan_history') || '[]') } catch { return [] }
   })
 
-  // zvoliť zadnú kameru
+  // vybrať zadnú kameru
   useEffect(() => {
     navigator.mediaDevices?.enumerateDevices?.().then(devs => {
       const cams = devs.filter(d => d.kind === 'videoinput')
@@ -36,14 +38,13 @@ export default function App() {
     }).catch(()=>{})
   }, [])
 
-  // zastavenie videostreamu = ukončenie skenu
   function stopStream() {
     const ms = videoRef.current?.srcObject as MediaStream | undefined
     ms?.getTracks().forEach(t => t.stop())
     if (videoRef.current) videoRef.current.srcObject = null
   }
 
-  // spustenie / vypnutie skenovania
+  // spustiť / vypnúť skenovanie
   useEffect(() => {
     if (!scanning) { stopStream(); return }
 
@@ -60,22 +61,38 @@ export default function App() {
     hints.set(DecodeHintType.TRY_HARDER, true)
 
     const reader = new BrowserMultiFormatReader(hints as any)
-    readerRef.current = reader
 
     reader.decodeFromVideoDevice(
-      cameraId,               // undefined = default kamera, alebo konkrétne deviceId
+      cameraId,
       videoRef.current!,
       (res?: Result) => {
         if (!res) return
         const code = res.getText()
+
+        // 1) zámok: ak už spracúvame, ignoruj
+        if (processingRef.current) return
+
+        // 2) debounce: iný kód alebo 2s pauza
         const now = Date.now()
-        if (!lastScanRef.current || lastScanRef.current.code !== code || (now - lastScanRef.current.at) >= 2000) {
-          lastScanRef.current = { code, at: now }
-          try { navigator.vibrate?.(50) } catch {}
-          setBarcode(code)
-          setScanning(false)   // vypne sken -> stopStream() vráti kameru
-          fetchProduct(code)
+        if (lastScanRef.current &&
+            lastScanRef.current.code === code &&
+            (now - lastScanRef.current.at) < 2000) {
+          return
         }
+        lastScanRef.current = { code, at: now }
+
+        processingRef.current = true
+        try { navigator.vibrate?.(50) } catch {}
+        setBarcode(code)
+
+        // vypni sken (vypnutie streamu ešte trvá 1-2 cykly, preto necháme menšiu pauzu)
+        setScanning(false)
+        setTimeout(() => {
+          fetchProduct(code).finally(() => {
+            // zámok pustíme až po komplet spracovaní
+            processingRef.current = false
+          })
+        }, 80)
       }
     ).catch((e:any) => {
       setScanning(false)
@@ -87,10 +104,8 @@ export default function App() {
     })
 
     return () => { stopStream() }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [scanning, cameraId])
 
-  // prepínanie kamery
   async function switchCamera() {
     try {
       const devs = await navigator.mediaDevices.enumerateDevices()
@@ -99,11 +114,9 @@ export default function App() {
       const idx = cams.findIndex(c => c.deviceId === cameraId)
       const next = cams[(idx + 1) % cams.length]
       setCameraId(next.deviceId)
-      // keď je scanning true, useEffect sa reštartne s novou kamerou
     } catch {}
   }
 
-  // svetlo (torch) – len ak to kamera podporuje
   async function toggleTorch() {
     try {
       const ms = videoRef.current?.srcObject as MediaStream | undefined
@@ -199,10 +212,18 @@ export default function App() {
         <div className="h1">Radka Scanner</div>
         <div className="actions">
           <label className="switch">
-            <input type="checkbox" checked={scanning} onChange={e=>setScanning(e.target.checked)} />
+            <input
+              type="checkbox"
+              checked={scanning}
+              onChange={e=>{
+                // keď začíname nové skenovanie, určite odblokuj zámok
+                processingRef.current = false
+                setScanning(e.target.checked)
+              }}
+            />
             <span>Kamera</span>
           </label>
-          <button className="btn" onClick={()=>setScanning(true)}>Skenovať znova</button>
+          <button className="btn" onClick={() => { processingRef.current=false; setScanning(true) }}>Skenovať znova</button>
           <button className="btn" onClick={switchCamera}>Prepnúť kameru</button>
           <button className="btn" onClick={toggleTorch}>{torchOn ? 'Svetlo: ON' : 'Svetlo: OFF'}</button>
         </div>
@@ -221,12 +242,29 @@ export default function App() {
       <div className="card">
         <div style={{fontWeight:600, marginBottom:8}}>Vyhľadanie podľa kódu</div>
         <div className="grid grid-2">
-          <input className="input" placeholder="Zadaj EAN/UPC kód"
+          <input
+            className="input"
+            placeholder="Zadaj EAN/UPC kód"
             value={barcode}
             onChange={e=>setBarcode(e.target.value)}
-            onKeyDown={e=>{ if (e.key==='Enter' && barcode) fetchProduct(barcode) }}
+            onKeyDown={e=>{
+              if (e.key === 'Enter') {
+                e.preventDefault()
+                if (!barcode || loading || processingRef.current) return
+                processingRef.current = true
+                fetchProduct(barcode).finally(()=>{ processingRef.current = false })
+              }
+            }}
           />
-          <button className="btn btn-primary" disabled={!barcode || loading} onClick={()=>barcode && fetchProduct(barcode)}>
+          <button
+            className="btn btn-primary"
+            disabled={!barcode || loading || processingRef.current}
+            onClick={()=>{
+              if (!barcode || loading || processingRef.current) return
+              processingRef.current = true
+              fetchProduct(barcode).finally(()=>{ processingRef.current = false })
+            }}
+          >
             {loading ? 'Načítavam…' : 'Vyhľadať'}
           </button>
         </div>
@@ -307,4 +345,4 @@ export default function App() {
       <div className="footer-note">Toto je pomocný nástroj. Pri nejasnostiach vždy skontroluj etiketu výrobku.</div>
     </div>
   )
-      }
+                                    }

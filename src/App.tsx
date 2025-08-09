@@ -3,7 +3,9 @@ import {
   BrowserMultiFormatReader,
   DecodeHintType,
   BarcodeFormat,
-  NotFoundException
+  NotFoundException,
+  Result,
+  Exception
 } from '@zxing/library'
 
 type EvalStatus = 'safe' | 'avoid' | 'maybe'
@@ -67,7 +69,7 @@ export default function App() {
       stopVideoTracks()
       return
     }
-    (async () => {
+    ;(async () => {
       setCamError(null)
       try {
         // 1) explicitné povolenie (pre Android WebView autoplay)
@@ -91,7 +93,7 @@ export default function App() {
 
         // 3) štart čítačky
         startReader()
-      } catch (e:any) {
+      } catch (e: any) {
         setHasCamPermission(false)
         setScanning(false)
         setCamError(e?.name === 'NotAllowedError'
@@ -105,7 +107,7 @@ export default function App() {
   // Pri zmene kamery reštartni stream + reader
   useEffect(() => {
     if (!scanning) return
-    (async () => {
+    ;(async () => {
       try {
         readerRef.current?.reset()
         stopVideoTracks()
@@ -136,12 +138,13 @@ export default function App() {
     readerRef.current = reader
 
     reader.decodeFromVideoDevice(
-      cameraId || undefined,
+      cameraId ?? null,          // <- TS: string | null
       videoRef.current,
-      (result, err) => {
+      (result: Result | undefined, err: Exception | undefined) => {
         if (result) {
           const code = result.getText()
           const now = Date.now()
+          // anti-duplikát na 2 sekundy
           if (lastScanRef.current && lastScanRef.current.code === code && (now - lastScanRef.current.at) < 2000) return
           lastScanRef.current = { code, at: now }
           try { navigator.vibrate?.(60) } catch {}
@@ -150,7 +153,7 @@ export default function App() {
           reader.reset()
           fetchProduct(code)
         } else if (err && !(err instanceof NotFoundException)) {
-          // iné chyby ignorujeme; NotFound = len nenašlo v tomto frame
+          // iné chyby ako "nenašiel v tomto frame" môžeme zalogovať, ale neriešime
         }
       }
     )
@@ -293,7 +296,7 @@ export default function App() {
             onChange={e=>setBarcode(e.target.value)}
             onKeyDown={e=>{ if (e.key==='Enter' && barcode) fetchProduct(barcode) }}
           />
-          <button className="btn btn-primary" disabled={!barcode || loading} onClick={()=>barcode && fetchProduct(barcode)}>
+        <button className="btn btn-primary" disabled={!barcode || loading} onClick={()=>barcode && fetchProduct(barcode)}>
             {loading ? 'Načítavam…' : 'Vyhľadať'}
           </button>
         </div>

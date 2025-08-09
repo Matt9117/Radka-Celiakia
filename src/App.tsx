@@ -16,14 +16,14 @@ export default function App() {
   const [notes, setNotes] = useState<string[]>([])
   const [cameraId, setCameraId] = useState<string | undefined>(undefined)
   const [history, setHistory] = useState<any[]>(() => {
-    try { return JSON.parse(localStorage.getItem('radka_scan_history')||'[]') } catch { return [] }
+    try { return JSON.parse(localStorage.getItem('radka_scan_history') || '[]') } catch { return [] }
   })
 
-  // refs na videá
-  const videoRef = useRef<HTMLVideoElement | null>(null)       // hlavný náhľad (ZXing)
-  const probeRef = useRef<HTMLVideoElement | null>(null)       // skrytý – len na vyvolanie povolenia
+  // refs
+  const videoRef = useRef<HTMLVideoElement | null>(null)   // hlavné video
+  const probeRef = useRef<HTMLVideoElement | null>(null)   // skryté – na získanie povolenia
 
-  // zisti dostupné kamery (preferuj zadnú)
+  // predvoliť zadnú kameru
   useEffect(() => {
     navigator.mediaDevices?.enumerateDevices?.().then(devs => {
       const cams = devs.filter(d => d.kind === 'videoinput')
@@ -38,8 +38,8 @@ export default function App() {
     video: cameraId ? { deviceId: { exact: cameraId } as any } : { facingMode: 'environment' }
   }), [cameraId])
 
-  // React-ZXing – číta z <video>, ktoré mu dáme (videoRef)
-  const { ref: zxingAttach } = useZxing({
+  // ZXing dekóder
+  const { ref: zxingRef } = useZxing({
     onDecodeResult: (result) => {
       const code = result.getText()
       setBarcode(code)
@@ -50,44 +50,39 @@ export default function App() {
     constraints
   })
 
-  // prepojenie našej ref s hookom (a nastavenie autoplay atribútov)
+  // priradenie ref pre naše video + pre useZxing
   const attachBothRefs = (el: HTMLVideoElement | null) => {
     videoRef.current = el
-    zxingAttach(el)
+    ;(zxingRef as React.MutableRefObject<HTMLVideoElement | null>).current = el
     if (el) {
-      // kritické pre WebView: autoplay bez zvuku
       el.setAttribute('playsinline', '')
       el.setAttribute('autoplay', '')
       el.muted = true
     }
   }
 
-  // ukladanie histórie
+  // ukladaj históriu
   useEffect(() => {
-    localStorage.setItem('radka_scan_history', JSON.stringify(history.slice(0,50)))
+    localStorage.setItem('radka_scan_history', JSON.stringify(history.slice(0, 50)))
   }, [history])
 
-  // keď zapneš „Kamera“, najprv si explicitne vypýtaj prístup (Android WebView to potrebuje)
+  // keď zapneš "Kamera" – explicitne vyžiadaj povolenie a "prebuď" autoplay
   useEffect(() => {
     if (!scanning) return
-    (async () => {
+    ;(async () => {
       setCamError(null)
       try {
         const stream = await navigator.mediaDevices.getUserMedia({ video: constraints.video as MediaTrackConstraints })
         setHasCamPermission(true)
 
-        // priraď stream do skrytého videa, rozbehni ho (vyvolá povolenie/autoplay)
         if (probeRef.current) {
           probeRef.current.srcObject = stream
           try { await probeRef.current.play() } catch {}
         }
-        // stream hneď stopneme – zxing si otvorí vlastný, ale už máme povolenie
+        // stopneme – ZXing si otvorí vlastný
         stream.getTracks().forEach(t => t.stop())
 
-        // ak je už rendernuté hlavné video, skús ho explicitne "prebudiť"
-        setTimeout(() => {
-          try { videoRef.current?.play() } catch {}
-        }, 50)
+        setTimeout(() => { try { videoRef.current?.play() } catch {} }, 50)
       } catch (e: any) {
         setHasCamPermission(false)
         setScanning(false)
@@ -98,17 +93,15 @@ export default function App() {
     })()
   }, [scanning, constraints])
 
-  // ručné prepínanie kamery (ak by zobral prednú)
   async function switchCamera() {
     try {
       const devs = await navigator.mediaDevices.enumerateDevices()
-      const cams = devs.filter(d=>d.kind==='videoinput')
+      const cams = devs.filter(d => d.kind === 'videoinput')
       if (!cams.length) return
-      const idx = cams.findIndex(c=>c.deviceId===cameraId)
-      const next = cams[(idx+1)%cams.length]
+      const idx = cams.findIndex(c => c.deviceId === cameraId)
+      const next = cams[(idx + 1) % cams.length]
       setCameraId(next.deviceId)
-      // jemne reštartni prehrávanie
-      setTimeout(()=>{ try { videoRef.current?.play() } catch {} }, 100)
+      setTimeout(() => { try { videoRef.current?.play() } catch {} }, 100)
     } catch {}
   }
 
@@ -140,20 +133,16 @@ export default function App() {
 
   function evaluateProduct(p:any): {status:EvalStatus, notes:string[]} {
     const notes:string[]=[]
-
     const allergenTags:string[] = p.allergens_tags || []
     const hasGlutenTag = allergenTags.some(t=>/(^|:)gluten$/i.test(t))
     const hasMilkTag = allergenTags.some(t=>/(^|:)milk$/i.test(t))
-
     const ingrAnalysis = p.ingredients_analysis_tags || []
     const maybeGluten = ingrAnalysis.some((t:string)=>/may-contain-gluten/i.test(t))
-
     const ingredientsText = (p.ingredients_text || p.ingredients_text_en || p.ingredients_text_sk || '').toLowerCase()
     const milkTerms = ['mlieko','mliecna bielkovina','mliečna bielkovina','mlezivo','srvátka','whey','casein','kazein','kazeín','maslo','smotana','syr','tvaroh','mliečny']
     const glutenTerms = ['lepok','pšenica','psenica','wheat','jačmeň','jacmen','barley','raž','raz','rye','špalda','spelta','spelt','ovos']
     const hasMilkText = milkTerms.some(t=>ingredientsText.includes(t))
     const hasGlutenText = glutenTerms.some(t=>ingredientsText.includes(t))
-
     const claims = `${p.labels || ''} ${p.traces || ''} ${(p.traces_tags||[]).join(' ')}`.toLowerCase()
     const saysGlutenFree = /gluten[- ]?free|bez lepku|bezlepkov/i.test(claims)
 

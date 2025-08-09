@@ -1,348 +1,164 @@
-import React, { useEffect, useRef, useState } from 'react'
-import { BrowserMultiFormatReader } from '@zxing/browser'
-import { DecodeHintType, BarcodeFormat, Result } from '@zxing/library'
+import React, { useState, useRef, useEffect } from 'react';
+import { BrowserMultiFormatReader, DecodeHintType, BarcodeFormat, Result } from '@zxing/library';
 
-type EvalStatus = 'safe' | 'avoid' | 'maybe'
+const App: React.FC = () => {
+  const [barcode, setBarcode] = useState('');
+  const [loading, setLoading] = useState(false);
+  const [product, setProduct] = useState<any>(null);
+  const [scanning, setScanning] = useState(false);
 
-export default function App() {
-  // kamera
-  const videoRef = useRef<HTMLVideoElement | null>(null)
-  const [scanning, setScanning] = useState(false)
-  const [cameraId, setCameraId] = useState<string | undefined>(undefined)
-  const [camError, setCamError] = useState<string | null>(null)
-  const [torchOn, setTorchOn] = useState(false)
+  const videoRef = useRef<HTMLVideoElement>(null);
+  const streamRef = useRef<MediaStream | null>(null);
+  const processingRef = useRef(false);
+  const manualEditRef = useRef(false);
+  const readerRef = useRef<BrowserMultiFormatReader | null>(null);
 
-  // anti-duplicačná logika
-  const lastScanRef = useRef<{ code: string; at: number } | null>(null)
-  const processingRef = useRef(false) // zámok: práve spracúvame produkt => ignoruj ďalšie decode/Enter
-
-  // produkt / UI
-  const [barcode, setBarcode] = useState('')
-  const [loading, setLoading] = useState(false)
-  const [error, setError] = useState<string | null>(null)
-  const [product, setProduct] = useState<any>(null)
-  const [evaluation, setEvaluation] = useState<EvalStatus | null>(null)
-  const [notes, setNotes] = useState<string[]>([])
-  const [history, setHistory] = useState<any[]>(() => {
-    try { return JSON.parse(localStorage.getItem('radka_scan_history') || '[]') } catch { return [] }
-  })
-
-  // vybrať zadnú kameru
-  useEffect(() => {
-    navigator.mediaDevices?.enumerateDevices?.().then(devs => {
-      const cams = devs.filter(d => d.kind === 'videoinput')
-      if (cams.length) {
-        const back = cams.find(c => /back|rear|environment/i.test(c.label))
-        setCameraId(back?.deviceId || cams[0].deviceId)
-      }
-    }).catch(()=>{})
-  }, [])
-
-  function stopStream() {
-    const ms = videoRef.current?.srcObject as MediaStream | undefined
-    ms?.getTracks().forEach(t => t.stop())
-    if (videoRef.current) videoRef.current.srcObject = null
-  }
-
-  // spustiť / vypnúť skenovanie
-  useEffect(() => {
-    if (!scanning) { stopStream(); return }
-
-    setCamError(null)
-
-    const hints = new Map()
-    hints.set(DecodeHintType.POSSIBLE_FORMATS, [
-      BarcodeFormat.EAN_13, BarcodeFormat.EAN_8,
-      BarcodeFormat.UPC_A,  BarcodeFormat.UPC_E,
-      BarcodeFormat.CODE_128, BarcodeFormat.CODE_39,
-      BarcodeFormat.ITF, BarcodeFormat.CODE_93,
-      BarcodeFormat.QR_CODE
-    ])
-    hints.set(DecodeHintType.TRY_HARDER, true)
-
-    const reader = new BrowserMultiFormatReader(hints as any)
-
-    reader.decodeFromVideoDevice(
-      cameraId,
-      videoRef.current!,
-      (res?: Result) => {
-        if (!res) return
-        const code = res.getText()
-
-        // 1) zámok: ak už spracúvame, ignoruj
-        if (processingRef.current) return
-
-        // 2) debounce: iný kód alebo 2s pauza
-        const now = Date.now()
-        if (lastScanRef.current &&
-            lastScanRef.current.code === code &&
-            (now - lastScanRef.current.at) < 2000) {
-          return
-        }
-        lastScanRef.current = { code, at: now }
-
-        processingRef.current = true
-        try { navigator.vibrate?.(50) } catch {}
-        setBarcode(code)
-
-        // vypni sken (vypnutie streamu ešte trvá 1-2 cykly, preto necháme menšiu pauzu)
-        setScanning(false)
-        setTimeout(() => {
-          fetchProduct(code).finally(() => {
-            // zámok pustíme až po komplet spracovaní
-            processingRef.current = false
-          })
-        }, 80)
-      }
-    ).catch((e:any) => {
-      setScanning(false)
-      setCamError(
-        e?.name === 'NotAllowedError'
-          ? 'Prístup ku kamere bol zamietnutý. Povoliť v Nastavenia > Aplikácie > Radka Scanner > Povolenia > Kamera.'
-          : e?.message || 'Kameru sa nepodarilo spustiť.'
-      )
-    })
-
-    return () => { stopStream() }
-  }, [scanning, cameraId])
-
-  async function switchCamera() {
+  const fetchProduct = async (code: string) => {
+    setLoading(true);
     try {
-      const devs = await navigator.mediaDevices.enumerateDevices()
-      const cams = devs.filter(d => d.kind === 'videoinput')
-      if (!cams.length) return
-      const idx = cams.findIndex(c => c.deviceId === cameraId)
-      const next = cams[(idx + 1) % cams.length]
-      setCameraId(next.deviceId)
-    } catch {}
-  }
-
-  async function toggleTorch() {
-    try {
-      const ms = videoRef.current?.srcObject as MediaStream | undefined
-      const track = ms?.getVideoTracks?.()[0]
-      if (!track) return
-      const caps: any = track.getCapabilities?.()
-      if (!caps || !('torch' in caps)) {
-        setCamError('Svetlo nie je podporované na tejto kamere.')
-        setTimeout(()=>setCamError(null), 2000)
-        return
-      }
-      await track.applyConstraints({ advanced: [{ torch: !torchOn }] } as any)
-      setTorchOn(v => !v)
-    } catch (e:any) {
-      setCamError(e?.message || 'Torch sa nepodarilo zapnúť.')
-      setTimeout(()=>setCamError(null), 2000)
+      const res = await fetch(`https://world.openfoodfacts.org/api/v0/product/${code}.json`);
+      const data = await res.json();
+      setProduct(data.product || null);
+    } catch {
+      setProduct(null);
+    } finally {
+      setLoading(false);
     }
-  }
+  };
 
-  // história
+  const stopStream = () => {
+    streamRef.current?.getTracks().forEach(track => track.stop());
+    streamRef.current = null;
+  };
+
   useEffect(() => {
-    localStorage.setItem('radka_scan_history', JSON.stringify(history.slice(0,50)))
-  }, [history])
+    if (scanning) {
+      const hints = new Map();
+      hints.set(DecodeHintType.POSSIBLE_FORMATS, [BarcodeFormat.EAN_13, BarcodeFormat.EAN_8, BarcodeFormat.UPC_A, BarcodeFormat.UPC_E]);
 
-  // fetch + vyhodnotenie
-  async function fetchProduct(code: string) {
-    setLoading(true); setError(null); setProduct(null); setEvaluation(null); setNotes([])
-    try {
-      const res = await fetch(`https://world.openfoodfacts.org/api/v2/product/${code}.json`)
-      if (!res.ok) throw new Error('Chyba pripojenia k databáze')
-      const data = await res.json()
-      if (data.status !== 1 || !data.product) { setError('Produkt sa nenašiel. Skús manuálne zadať EAN.'); return }
-      const p = data.product
-      setProduct(p)
-      const evalResult = evaluateProduct(p)
-      setEvaluation(evalResult.status)
-      setNotes(evalResult.notes)
-      setHistory(h => [{
-        code,
-        brand: p.brands || '',
-        name: p.product_name || p.generic_name || 'Neznámy produkt',
-        status: evalResult.status,
-        ts: Date.now(),
-      }, ...h.filter((x:any)=>x.code!==code)].slice(0,50))
-    } catch (e:any) {
-      setError(e?.message || 'Neznáma chyba')
-    } finally { setLoading(false) }
-  }
+      const reader = new BrowserMultiFormatReader(hints as any);
+      readerRef.current = reader;
 
-  function evaluateProduct(p:any): {status:EvalStatus, notes:string[]} {
-    const notes:string[]=[]
-    const allergenTags:string[] = p.allergens_tags || []
-    const hasGlutenTag = allergenTags.some(t=>/(^|:)gluten$/i.test(t))
-    const hasMilkTag = allergenTags.some(t=>/(^|:)milk$/i.test(t))
-    const ingrAnalysis = p.ingredients_analysis_tags || []
-    const maybeGluten = ingrAnalysis.some((t:string)=>/may-contain-gluten/i.test(t))
-    const ingredientsText = (p.ingredients_text || p.ingredients_text_en || p.ingredients_text_sk || '').toLowerCase()
-    const milkTerms = ['mlieko','mliecna bielkovina','mliečna bielkovina','mlezivo','srvátka','whey','casein','kazein','kazeín','maslo','smotana','syr','tvaroh','mliečny']
-    const glutenTerms = ['lepok','pšenica','psenica','wheat','jačmeň','jacmen','barley','raž','raz','rye','špalda','spelta','spelt','ovos']
-    const hasMilkText = milkTerms.some(t=>ingredientsText.includes(t))
-    const hasGlutenText = glutenTerms.some(t=>ingredientsText.includes(t))
-    const claims = `${p.labels || ''} ${p.traces || ''} ${(p.traces_tags||[]).join(' ')}`.toLowerCase()
-    const saysGlutenFree = /gluten[- ]?free|bez lepku|bezlepkov/i.test(claims)
+      navigator.mediaDevices.getUserMedia({ video: { facingMode: 'environment' } })
+        .then((stream) => {
+          streamRef.current = stream;
+          if (videoRef.current) videoRef.current.srcObject = stream;
 
-    let status:EvalStatus = 'maybe'
-    if (hasMilkTag || hasMilkText) { status='avoid'; notes.push('Obsahuje mliečnu bielkovinu.') }
-    if (hasGlutenTag || hasGlutenText) { status='avoid'; notes.push('Obsahuje lepok.') }
-    if (!hasMilkTag && !hasMilkText && !hasGlutenTag && !hasGlutenText) {
-      if (saysGlutenFree && !maybeGluten) { status='safe'; notes.push('Deklarované ako bezlepkové a bez mlieka.') }
-      else { status='maybe'; notes.push('Nenašli sa rizikové alergény, ale deklarácia nie je jasná.') }
+          reader.decodeFromVideoDevice(null, videoRef.current!, (res?: Result) => {
+            if (!res) return;
+            const code = res.getText();
+
+            if (!manualEditRef.current) {
+              setBarcode(code);
+            }
+
+            processingRef.current = true;
+            try { navigator.vibrate?.(50) } catch {}
+            setScanning(false);
+
+            setTimeout(() => {
+              fetchProduct(code).finally(() => {
+                processingRef.current = false;
+              });
+            }, 80);
+          });
+        })
+        .catch(console.error);
+
+      return () => {
+        reader.reset();
+        stopStream();
+      };
+    } else {
+      readerRef.current?.reset();
+      stopStream();
     }
-    const tracesText = (p.traces || (p.traces_tags||[]).join(', ') || '').toLowerCase()
-    if (/milk/.test(tracesText)) { notes.push('Môže obsahovať stopy mlieka.'); if (status==='safe') status='maybe' }
-    if (/gluten|wheat|barley|rye/.test(tracesText)) { notes.push('Môže obsahovať stopy lepku.'); if (status==='safe') status='maybe' }
-    return { status, notes }
-  }
-
-  function statusLabel(s: EvalStatus | null) {
-    if (s === 'safe') return (<span className="badge badge-ok">Bezpečné</span>)
-    if (s === 'avoid') return (<span className="badge badge-bad">Vyhnúť sa</span>)
-    if (s === 'maybe') return (<span className="badge badge-warn">Neisté</span>)
-    return (<span className="badge">Zatiaľ nič</span>)
-  }
-
-  function clearHistory() {
-    localStorage.removeItem('radka_scan_history')
-    setHistory([])
-  }
+  }, [scanning]);
 
   return (
-    <div className="container">
-      <div className="header">
-        <div className="h1">Radka Scanner</div>
-        <div className="actions">
-          <label className="switch">
-            <input
-              type="checkbox"
-              checked={scanning}
-              onChange={e=>{
-                // keď začíname nové skenovanie, určite odblokuj zámok
-                processingRef.current = false
-                setScanning(e.target.checked)
-              }}
-            />
-            <span>Kamera</span>
-          </label>
-          <button className="btn" onClick={() => { processingRef.current=false; setScanning(true) }}>Skenovať znova</button>
-          <button className="btn" onClick={switchCamera}>Prepnúť kameru</button>
-          <button className="btn" onClick={toggleTorch}>{torchOn ? 'Svetlo: ON' : 'Svetlo: OFF'}</button>
-        </div>
-      </div>
-
-      {camError && <div className="card alert-bad">{camError}</div>}
+    <div style={{ fontFamily: 'sans-serif', padding: '1rem', background: '#f7f7f7', minHeight: '100vh' }}>
+      <h1 style={{ color: '#333', textAlign: 'center' }}>Radka Scanner</h1>
 
       {scanning && (
-        <div className="card">
-          <div className="video-wrap">
-            <video ref={videoRef} playsInline autoPlay muted style={{width:'100%',height:'100%',objectFit:'cover'}} />
-          </div>
-        </div>
+        <video
+          ref={videoRef}
+          style={{ width: '100%', borderRadius: '8px', marginBottom: '1rem' }}
+          autoPlay
+          muted
+        />
       )}
 
-      <div className="card">
-        <div style={{fontWeight:600, marginBottom:8}}>Vyhľadanie podľa kódu</div>
-        <div className="grid grid-2">
-          <input
-            className="input"
-            placeholder="Zadaj EAN/UPC kód"
-            value={barcode}
-            onChange={e=>setBarcode(e.target.value)}
-            onKeyDown={e=>{
-              if (e.key === 'Enter') {
-                e.preventDefault()
-                if (!barcode || loading || processingRef.current) return
-                processingRef.current = true
-                fetchProduct(barcode).finally(()=>{ processingRef.current = false })
-              }
-            }}
-          />
-          <button
-            className="btn btn-primary"
-            disabled={!barcode || loading || processingRef.current}
-            onClick={()=>{
-              if (!barcode || loading || processingRef.current) return
-              processingRef.current = true
-              fetchProduct(barcode).finally(()=>{ processingRef.current = false })
-            }}
-          >
-            {loading ? 'Načítavam…' : 'Vyhľadať'}
-          </button>
-        </div>
-        <div className="helper">Tip: ak skener nenačíta, prepíš kód ručne. Dáta čerpáme z Open Food Facts.</div>
+      <div style={{ display: 'flex', gap: '0.5rem', marginBottom: '1rem' }}>
+        <input
+          style={{ flex: 1, padding: '0.5rem', fontSize: '1rem', borderRadius: '4px', border: '1px solid #ccc' }}
+          placeholder="Zadaj EAN/UPC kód"
+          value={barcode}
+          onChange={(e) => {
+            manualEditRef.current = true;
+            setBarcode(e.target.value);
+          }}
+          onKeyDown={(e) => {
+            if (e.key === 'Enter') {
+              e.preventDefault();
+              if (!barcode || loading || processingRef.current) return;
+              manualEditRef.current = true;
+              processingRef.current = true;
+              fetchProduct(barcode).finally(() => {
+                processingRef.current = false;
+              });
+            }
+          }}
+        />
+        <button
+          style={{ padding: '0.5rem 1rem', fontSize: '1rem', background: '#1976d2', color: '#fff', border: 'none', borderRadius: '4px' }}
+          onClick={() => {
+            if (!barcode || loading || processingRef.current) return;
+            manualEditRef.current = true;
+            processingRef.current = true;
+            fetchProduct(barcode).finally(() => {
+              processingRef.current = false;
+            });
+          }}
+        >
+          Vyhľadať
+        </button>
       </div>
 
-      {error && <div className="card alert-bad">{error}</div>}
+      <button
+        style={{
+          width: '100%',
+          padding: '0.75rem',
+          fontSize: '1rem',
+          background: scanning ? '#d32f2f' : '#388e3c',
+          color: '#fff',
+          border: 'none',
+          borderRadius: '4px',
+          marginBottom: '1rem'
+        }}
+        onClick={() => {
+          if (scanning) {
+            setScanning(false);
+          } else {
+            processingRef.current = false;
+            manualEditRef.current = false;
+            setScanning(true);
+          }
+        }}
+      >
+        {scanning ? 'Stop' : 'Spustiť kameru'}
+      </button>
 
+      {loading && <p>Načítavam údaje…</p>}
       {product && (
-        <div className="card">
-          <div className="grid" style={{gap:10}}>
-            <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',gap:10,flexWrap:'wrap'}}>
-              <div style={{fontWeight:700,fontSize:16}}>{product.product_name || product.generic_name || 'Neznámy produkt'}</div>
-              <div>{statusLabel(evaluation)}</div>
-            </div>
-            <div className="helper">Kód: {product.code}</div>
-
-            {notes.length>0 && (
-              <ul style={{margin:'0 0 4px 18px', lineHeight:1.5}}>
-                {notes.map((n,i)=><li key={i}>{n}</li>)}
-              </ul>
-            )}
-
-            <div className="grid grid-50">
-              <div>
-                <div style={{fontWeight:600, marginBottom:6}}>Alergény (z databázy)</div>
-                <div style={{display:'flex', gap:6, flexWrap:'wrap'}}>
-                  {(product.allergens_hierarchy || []).length
-                    ? (product.allergens_hierarchy || []).map((t:string)=>(
-                      <span key={t} className="tag">{t.replace(/^.*:/,'')}</span>
-                    ))
-                    : <span className="helper">Neuvádzané</span>}
-                </div>
-              </div>
-              <div>
-                <div style={{fontWeight:600, marginBottom:6}}>Ingrediencie (sk/en)</div>
-                <div style={{fontSize:13, maxHeight:140, overflow:'auto', padding:10, borderRadius:12, background:'#0b1a2c', border:'1px solid var(--border)'}}>
-                  {product.ingredients_text_sk || product.ingredients_text_en || product.ingredients_text || 'Neuvádzané'}
-                </div>
-              </div>
-            </div>
-
-            <div className="helper">Zdroj: Open Food Facts • Posledná aktualizácia: {product.last_modified_t ? new Date(product.last_modified_t*1000).toLocaleDateString() : 'neuvedené'}</div>
-          </div>
+        <div style={{ background: '#fff', padding: '1rem', borderRadius: '8px', boxShadow: '0 0 8px rgba(0,0,0,0.1)' }}>
+          <h2>{product.product_name || 'Neznámy produkt'}</h2>
+          {product.image_url && (
+            <img src={product.image_url} alt={product.product_name} style={{ width: '100%', borderRadius: '4px' }} />
+          )}
         </div>
       )}
-
-      <div className="card">
-        <div style={{fontWeight:600, marginBottom:8}}>Posledné skeny</div>
-        {history.length===0 ? (
-          <div className="helper">Zatiaľ prázdne</div>
-        ) : (
-          <div style={{display:'flex',flexDirection:'column',gap:8}}>
-            {history.map((h:any)=>(
-              <button key={h.code} className="btn" style={{textAlign:'left', display:'block'}} onClick={()=>fetchProduct(h.code)}>
-                <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',gap:8}}>
-                  <div>
-                    <div style={{fontWeight:600}}>{h.name}</div>
-                    <div className="helper">{h.brand} • {h.code}</div>
-                  </div>
-                  <span className={
-                    h.status==='safe' ? 'badge badge-ok' :
-                    h.status==='avoid' ? 'badge badge-bad' :
-                    'badge badge-warn'
-                  }>
-                    {h.status==='safe' ? 'Bezpečné' : h.status==='avoid' ? 'Vyhnúť sa' : 'Neisté'}
-                  </span>
-                </div>
-              </button>
-            ))}
-          </div>
-        )}
-        <div style={{marginTop:10}}>
-          <button className="btn" onClick={clearHistory}>Vymazať históriu</button>
-        </div>
-      </div>
-
-      <div className="footer-note">Toto je pomocný nástroj. Pri nejasnostiach vždy skontroluj etiketu výrobku.</div>
     </div>
-  )
-                                    }
+  );
+};
+
+export default App;

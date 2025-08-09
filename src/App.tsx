@@ -148,13 +148,13 @@ export default function App() {
       if (!scanning || !videoRef.current || isDecodingRef.current) return
       isDecodingRef.current = true
       try {
-        const res = await reader.decodeOnceFromVideoElement(videoRef.current)
+        // jednorazová detekcia z aktuálneho frame-u
+        const res: Result | null = await reader.decodeFromVideoElement(videoRef.current).catch((err: Exception) => {
+          if (err instanceof NotFoundException) return null
+          return null // iné chyby ignorujeme v tomto ticku
+        }) as Result | null
+
         if (res) handleResult(res)
-      } catch (err) {
-        if (!(err instanceof NotFoundException)) {
-          // iné chyby môžeme zalogovať, ale nepadať
-          // console.warn(err)
-        }
       } finally {
         isDecodingRef.current = false
       }
@@ -353,7 +353,7 @@ export default function App() {
               </div>
             </div>
 
-            <div className="helper">Zdroj: Open Food Facts • Posledná aktualizácia: {product.last_modified_t ? new Date(p.last_modified_t*1000).toLocaleDateString() : 'neuvedené'}</div>
+            <div className="helper">Zdroj: Open Food Facts • Posledná aktualizácia: {product.last_modified_t ? new Date(product.last_modified_t*1000).toLocaleDateString() : 'neuvedené'}</div>
           </div>
         </div>
       )}
@@ -391,4 +391,4 @@ export default function App() {
       <div className="footer-note">Toto je pomocný nástroj. Pri nejasnostiach vždy skontroluj etiketu výrobku.</div>
     </div>
   )
-                                 }
+}

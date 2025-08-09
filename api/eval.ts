@@ -17,6 +17,7 @@ function setCors(req: VercelRequest, res: VercelResponse) {
   res.setHeader('Access-Control-Max-Age', '86400')
 }
 
+// bezpečné načítanie JSON tela aj keď príde zlý Content-Type
 async function readJsonBody(req: VercelRequest) {
   try {
     if ((req as any).body && typeof (req as any).body === 'object') {
@@ -38,9 +39,11 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
 
   if (req.method === 'OPTIONS') return res.status(200).end()
 
+  // Health-check v prehliadači
   if (req.method === 'GET') {
-    // Ľahký health-check v prehliadači
-    const hasKey = Boolean(process.env.OPENAI_API_KEY && process.env.OPENAI_API_KEY!.startsWith('sk-'))
+    const key = process.env.OPENAI_API_KEY
+    // akceptujeme aj sk-proj-*
+    const hasKey = !!(key && key.startsWith('sk'))
     return res.status(200).json({
       ok: true,
       message: 'Eval endpoint OK. Use POST with JSON.',
@@ -56,22 +59,28 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     const body = await readJsonBody(req)
     const { code, name, ingredients, allergens, lang } = body || {}
 
-    console.log('AI req body:', { code, name, hasIngredients: Boolean(ingredients), hasAllergens: Boolean(allergens), lang })
+    console.log('AI req:', {
+      code, name,
+      hasIngredients: Boolean(ingredients),
+      hasAllergens: Boolean(allergens),
+      lang
+    })
 
     if (!code) {
-      console.warn('Missing code in request body')
       return res.status(400).json({ error: 'Missing code' })
     }
 
     const apiKey = process.env.OPENAI_API_KEY
     if (!apiKey) {
-      console.error('OPENAI_API_KEY is missing in environment!')
-      return res.status(500).json({ error: 'Missing OPENAI_API_KEY in Vercel env' })
+      console.error('OPENAI_API_KEY missing!')
+      return res.status(500).json({ error: 'Missing OPENAI_API_KEY' })
     }
 
-    const system = `Si asistent na hodnotenie potravín pre celiakiu a alergiu na mliečnu bielkovinu.
-Vráť iba JSON v tvare:
-{"status":"safe|avoid|maybe","title":"krátke odôvodnenie","notes":["..."]}`
+    // Prompt – žiadame čistý JSON v presnom tvare
+    const system = `Si asistent pre hodnotenie potravín pre celiakiu a alergiu na mliečnu bielkovinu.
+Vráť presne 1 JSON objekt v tvare:
+{"status":"safe|avoid|maybe","title":"krátke odôvodnenie","notes":["..."]}.
+Bez komentárov, bez formátovania navyše.`
 
     const user = `EAN: ${code}
 Názov: ${name || '-'}
@@ -79,18 +88,22 @@ Alergény: ${allergens || '-'}
 Ingrediencie: ${ingredients || '-'}
 Jazyk: ${lang || 'sk'}`
 
-    const resp = await fetch('https://api.openai.com/v1/responses', {
+    // Chat Completions – stabilné a nevyžaduje beta headre
+    const resp = await fetch('https://api.openai.com/v1/chat/completions', {
       method: 'POST',
       headers: {
         'Authorization': `Bearer ${apiKey}`,
         'Content-Type': 'application/json'
       },
       body: JSON.stringify({
-        model: 'gpt-4.1-mini',
-        input: [
+        model: 'gpt-4o-mini',
+        response_format: { type: 'json_object' }, // vynúti validný JSON
+        messages: [
           { role: 'system', content: system },
           { role: 'user', content: user }
-        ]
+        ],
+        temperature: 0.2,
+        max_tokens: 250
       })
     })
 
@@ -100,20 +113,19 @@ Jazyk: ${lang || 'sk'}`
       return res.status(502).json({ error: 'OpenAI upstream error', status: resp.status, details: text })
     }
 
-    const data = await resp.json() as any
-    const text = data?.output_text || ''
-    console.log('AI raw output_text:', text)
+    const data: any = await resp.json()
+    const text = data?.choices?.[0]?.message?.content || ''
+    console.log('AI raw:', text)
 
+    // content je už JSON string (response_format=json_object)
     let parsed: any = null
-    try { parsed = JSON.parse(text) } catch (e) {
-      console.warn('AI JSON parse failed:', e)
-    }
+    try { parsed = JSON.parse(text) } catch (e) { /* fallback nižšie */ }
 
     if (!parsed || !parsed.status) {
       return res.status(200).json({
         status: 'maybe',
         title: 'Neisté',
-        notes: ['AI nevrátila jednoznačný JSON.'],
+        notes: ['AI nevrátila očakávaný JSON.'],
         raw: text
       })
     }

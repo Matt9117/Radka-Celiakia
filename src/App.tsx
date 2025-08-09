@@ -1,10 +1,6 @@
 import React, { CSSProperties, useEffect, useRef, useState } from "react";
-import {
-  BrowserMultiFormatReader,
-  IScannerControls,
-  BarcodeFormat,
-  DecodeHintType,
-} from "@zxing/browser";
+import { BrowserMultiFormatReader, IScannerControls } from "@zxing/browser";
+import { BarcodeFormat, DecodeHintType } from "@zxing/library";
 
 // === nastav svoju Vercel URL (končí /api/evaluate) ===
 const EVAL_URL = "https://radka-celiakia.vercel.app/api/evaluate";
@@ -41,7 +37,6 @@ const btnPrimary = (disabled?: boolean): CSSProperties => ({
 
 // ===== App =====
 export default function App() {
-  // UI / data
   const [scanning, setScanning] = useState(false);
   const [barcode, setBarcode] = useState("");
   const [loading, setLoading] = useState(false);
@@ -55,12 +50,10 @@ export default function App() {
     try { return JSON.parse(localStorage.getItem("radka_scan_history") || "[]") } catch { return [] }
   });
 
-  // Camera
   const [devices, setDevices] = useState<MediaDeviceInfo[]>([]);
   const [deviceId, setDeviceId] = useState<string | null>(null);
   const [preferBack, setPreferBack] = useState(true);
 
-  // Scanner internals
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const controlsRef = useRef<IScannerControls | null>(null);
   const lastCodeRef = useRef<string | null>(null);
@@ -70,11 +63,10 @@ export default function App() {
     try { localStorage.setItem("radka_scan_history", JSON.stringify(history.slice(0,50))) } catch {}
   }, [history]);
 
-  // zisti kamery / preferuj zadnú
   useEffect(() => {
     (async () => {
       try {
-        const all = await navigator.mediaDevices.enumerateDevices();
+        const all = await (navigator.mediaDevices?.enumerateDevices?.() ?? Promise.resolve([] as MediaDeviceInfo[]));
         const cams = all.filter(d => d.kind === "videoinput");
         setDevices(cams);
         if (!deviceId) {
@@ -84,9 +76,8 @@ export default function App() {
         }
       } catch {/* ignore */}
     })();
-  }, [preferBack]); // keď prepneš preferenciu, pokúsime sa vybrať inú kameru
+  }, [preferBack]);
 
-  // Start/Stop scanning
   useEffect(() => {
     if (!scanning) return;
 
@@ -94,14 +85,13 @@ export default function App() {
 
     const start = async () => {
       try {
-        // formáty, ktoré nás zaujímajú
         const formats = [BarcodeFormat.EAN_13, BarcodeFormat.EAN_8, BarcodeFormat.UPC_A, BarcodeFormat.UPC_E, BarcodeFormat.CODE_128];
-        const hints = new Map();
+        const hints = new Map<DecodeHintType, any>();
         hints.set(DecodeHintType.POSSIBLE_FORMATS, formats);
 
-        const reader = new BrowserMultiFormatReader(hints, 400);
+        // ✅ žiadne číslo 400 – to spôsobovalo TS chybu
+        const reader = new BrowserMultiFormatReader(hints);
 
-        // ak nemáme konkrétne deviceId, použijeme undefined (pre auto výber)
         const id = deviceId ?? undefined;
 
         controlsRef.current = await reader.decodeFromVideoDevice(id, videoRef.current!, (result) => {
@@ -109,7 +99,7 @@ export default function App() {
           const code = result.getText().trim();
           if (!code) return;
           const now = Date.now();
-          if (code === lastCodeRef.current && now - lastScanTsRef.current < 1200) return; // debounce duplicitného čítania
+          if (code === lastCodeRef.current && now - lastScanTsRef.current < 1200) return;
 
           lastCodeRef.current = code;
           lastScanTsRef.current = now;
@@ -128,32 +118,26 @@ export default function App() {
 
     start();
 
-    // cleanup
-    return () => {
-      try { controlsRef.current?.stop(); } catch {}
-    };
+    return () => { try { controlsRef.current?.stop(); } catch {} };
   }, [scanning, deviceId]);
 
   function toggleCamera() {
     if (!devices.length) return;
     setPreferBack(v => !v);
     setDeviceId(null);
-    if (scanning) setScanning(false); // bezpečné vypnutie, nech si ju znova zapneš
+    if (scanning) setScanning(false);
   }
 
-  // --- OFF + AI fallback ---
   async function fetchProduct(code: string) {
     if (!code) return;
     setLoading(true); setError(null); setProduct(null); setEvaluation(null); setNotes([]);
 
     try {
-      // 1) Open Food Facts
       const res = await fetch(`https://world.openfoodfacts.org/api/v2/product/${encodeURIComponent(code)}.json`);
       const ok = res.ok;
       const data = ok ? await res.json() : null;
 
       if (!ok || !data || data.status !== 1 || !data.product) {
-        // OFF nič -> skús AI iba s EAN (môže vrátiť len "maybe")
         await aiEvaluate(null);
         return;
       }
@@ -161,17 +145,14 @@ export default function App() {
       const p = data.product;
       setProduct(p);
 
-      // lokálna heuristika
       const ev = evaluateProduct(p);
       setEvaluation(ev.status);
       setNotes(ev.notes);
 
-      // ak je neisté -> spýtame sa AI
       if (ev.status === "maybe") {
         await aiEvaluate(p);
       }
 
-      // história
       setHistory(h => ([
         { code, brand: p.brands || "", name: p.product_name || p.generic_name || "Neznámy produkt", status: ev.status, ts: Date.now() },
         ...h.filter(x => x.code !== code)
@@ -185,7 +166,7 @@ export default function App() {
 
   async function aiEvaluate(p: any | null) {
     try {
-      if (!EVAL_URL || EVAL_URL.includes("<tvoje-vercel>")) return; // ešte si nenastavil URL
+      if (!EVAL_URL || EVAL_URL.includes("<tvoje-vercel>")) return;
       const payload = p ? {
         name: p.product_name || p.generic_name || "",
         brand: p.brands || "",
@@ -206,11 +187,10 @@ export default function App() {
         }
       }
     } catch {
-      // ticho – ostane pôvodný výsledok
+      // ticho
     }
   }
 
-  // === heuristika OFF (mlieko/lepok) + gluten-free fix ===
   function evaluateProduct(p: any): { status: EvalStatus; notes: string[] } {
     const notes: string[] = [];
 
@@ -231,7 +211,6 @@ export default function App() {
 
     const tracesText = (p.traces || (p.traces_tags || []).join(", ") || "").toString().toLowerCase();
 
-    // gluten-free z tagov alebo textu
     const labelsTags: string[] = p.labels_tags || [];
     const isLabeledGF = labelsTags.some((t) =>
       /(^|:)(gluten[- ]?free|en:gluten[- ]?free)$/.test(String(t).toLowerCase())
@@ -283,7 +262,6 @@ export default function App() {
   return (
     <div style={page}>
       <div style={container}>
-        {/* Header */}
         <header style={{
           display:"flex", justifyContent:"space-between", alignItems:"center", marginBottom:16, padding:12,
           borderRadius:16, background:"linear-gradient(90deg, rgba(124,58,237,0.10), rgba(167,139,250,0.10))",
@@ -301,7 +279,6 @@ export default function App() {
                 checked={scanning}
                 onChange={(e) => {
                   if (!e.target.checked) { try { controlsRef.current?.stop(); } catch {} }
-                  // pri zapnutí resetneme anti-dup markery
                   if (e.target.checked) { lastCodeRef.current = null; lastScanTsRef.current = 0; }
                   setScanning(e.target.checked);
                 }}
@@ -311,7 +288,6 @@ export default function App() {
           </div>
         </header>
 
-        {/* Scanner */}
         <section style={card()}>
           <div style={{ fontWeight: 700, marginBottom: 8 }}>Skenovanie čiarového kódu</div>
 
@@ -351,7 +327,6 @@ export default function App() {
           )}
         </section>
 
-        {/* Product */}
         {product && (
           <section style={card({ marginTop: 12 })}>
             <div style={{ display:"flex", justifyContent:"space-between", gap:10, flexWrap:"wrap" }}>
@@ -394,7 +369,6 @@ export default function App() {
           </section>
         )}
 
-        {/* History */}
         <History history={history} onPick={(code) => fetchProduct(code)} />
       </div>
     </div>

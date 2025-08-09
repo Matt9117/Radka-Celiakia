@@ -1,0 +1,61 @@
+
+name: Android APK
+
+on:
+  push:
+    branches: [ main, master ]
+  workflow_dispatch:
+
+jobs:
+  build-apk:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install deps
+        run: npm ci
+
+      - name: Build web
+        run: npm run build
+
+      - name: Add Android platform
+        run: npx cap add android
+
+      - name: Sync Capacitor
+        run: npx cap sync android
+
+      - name: Patch Android Manifest (add CAMERA permission)
+        run: |
+          XML=android/app/src/main/AndroidManifest.xml
+          # add tools namespace if missing
+          if ! grep -q 'xmlns:tools=' "$XML"; then
+            sed -i '0,/<manifest /s//<manifest xmlns:tools="http:\/\/schemas.android.com\/tools" /' "$XML"
+          fi
+          # add CAMERA permission if missing
+          if ! grep -q 'android.permission.CAMERA' "$XML"; then
+            sed -i '0,/<manifest[^>]*>/s//&\n    <uses-permission android:name="android.permission.CAMERA" \/>/' "$XML"
+          fi
+
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@v3
+        with:
+          api-level: 34
+          build-tools: 34.0.0
+
+      - name: Build debug APK
+        run: |
+          cd android
+          ./gradlew assembleDebug
+
+      - name: Upload APK artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: app-debug.apk
+          path: android/app/build/outputs/apk/debug/app-debug.apk

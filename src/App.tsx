@@ -25,9 +25,9 @@ export default function App() {
     try { return JSON.parse(localStorage.getItem('radka_scan_history') || '[]') } catch { return [] }
   })
 
-  // vyber zadnú kameru
+  // nájdi zadnú kameru
   useEffect(() => {
-    navigator.mediaDevices?.enumerateDevices?.().then((devs) => {
+    navigator.mediaDevices?.enumerateDevices?.().then(devs => {
       const cams = devs.filter(d => d.kind === 'videoinput')
       if (cams.length) {
         const back = cams.find(c => /back|rear|environment/i.test(c.label))
@@ -36,14 +36,17 @@ export default function App() {
     }).catch(()=>{})
   }, [])
 
-  // zapni/vypni skenovanie
+  function stopStream() {
+    const ms = videoRef.current?.srcObject as MediaStream | undefined
+    ms?.getTracks().forEach(t => t.stop())
+    if (videoRef.current) videoRef.current.srcObject = null
+    try { readerRef.current?.stopContinuousDecode() } catch {}
+  }
+
+  // spustenie / vypnutie skenovania
   useEffect(() => {
     if (!scanning) {
-      readerRef.current?.reset()
-      // stopni prípadné streamy
-      const ms = videoRef.current?.srcObject as MediaStream | undefined
-      ms?.getTracks().forEach(t => t.stop())
-      if (videoRef.current) videoRef.current.srcObject = null
+      stopStream()
       return
     }
 
@@ -62,26 +65,24 @@ export default function App() {
     const reader = new BrowserMultiFormatReader(hints as any)
     readerRef.current = reader
 
-    // Stabilná metóda: kontinuálny callback z video zariadenia (bez blikania)
+    // kontinuálne dekódovanie – zastavíme ho hneď po prvom úspechu
     reader.decodeFromVideoDevice(
-      cameraId,                  // @zxing/browser dovoľuje string | undefined
+      cameraId,                // string | undefined – OK pre @zxing/browser
       videoRef.current!,
-      (res?: Result, err?: unknown) => {
-        if (res) {
-          const code = res.getText()
-          const now = Date.now()
-          // anti-duplikát 2 s
-          if (!lastScanRef.current || lastScanRef.current.code !== code || (now - lastScanRef.current.at) >= 2000) {
-            lastScanRef.current = { code, at: now }
-            try { navigator.vibrate?.(50) } catch {}
-            setBarcode(code)
-            reader.reset()      // zastav čítanie (aby nešlo dookola)
-            setScanning(false)  // UI vypne kameru a uprace stream
-            fetchProduct(code)
-          }
+      (res?: Result, _err?: unknown) => {
+        if (!res) return
+        const code = res.getText()
+        const now = Date.now()
+        // anti-duplicitná poistka 2 s
+        if (!lastScanRef.current || lastScanRef.current.code !== code || (now - lastScanRef.current.at) >= 2000) {
+          lastScanRef.current = { code, at: now }
+          try { navigator.vibrate?.(50) } catch {}
+          setBarcode(code)
+          setScanning(false)   // týmto spustíme cleanup v useEffect vyššie
+          fetchProduct(code)
         }
       }
-    ).catch((e: any) => {
+    ).catch((e:any) => {
       setScanning(false)
       setCamError(
         e?.name === 'NotAllowedError'
@@ -90,12 +91,7 @@ export default function App() {
       )
     })
 
-    return () => {
-      reader.reset()
-      const ms = videoRef.current?.srcObject as MediaStream | undefined
-      ms?.getTracks().forEach(t => t.stop())
-      if (videoRef.current) videoRef.current.srcObject = null
-    }
+    return () => { stopStream() }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [scanning, cameraId])
 
@@ -108,11 +104,10 @@ export default function App() {
       const idx = cams.findIndex(c => c.deviceId === cameraId)
       const next = cams[(idx + 1) % cams.length]
       setCameraId(next.deviceId)
-      // ak je zapnuté skenovanie, reštartne sa cez useEffect
     } catch {}
   }
 
-  // torch (svetlo)
+  // svetlo (torch)
   async function toggleTorch() {
     try {
       const ms = videoRef.current?.srcObject as MediaStream | undefined
@@ -137,7 +132,7 @@ export default function App() {
     localStorage.setItem('radka_scan_history', JSON.stringify(history.slice(0,50)))
   }, [history])
 
-  // načítanie produktu z OFF + hodnotenie
+  // fetch + vyhodnotenie
   async function fetchProduct(code: string) {
     setLoading(true); setError(null); setProduct(null); setEvaluation(null); setNotes([])
     try {
@@ -211,6 +206,7 @@ export default function App() {
             <input type="checkbox" checked={scanning} onChange={e=>setScanning(e.target.checked)} />
             <span>Kamera</span>
           </label>
+          <button className="btn" onClick={()=>setScanning(true)}>Skenovať znova</button>
           <button className="btn" onClick={switchCamera}>Prepnúť kameru</button>
           <button className="btn" onClick={toggleTorch}>{torchOn ? 'Svetlo: ON' : 'Svetlo: OFF'}</button>
         </div>
@@ -315,4 +311,4 @@ export default function App() {
       <div className="footer-note">Toto je pomocný nástroj. Pri nejasnostiach vždy skontroluj etiketu výrobku.</div>
     </div>
   )
-}
+    }

@@ -2,7 +2,7 @@ name: Android APK
 
 on:
   push:
-    branches: [ main, master ]
+    branches: [ "main" ]
   workflow_dispatch:
 
 jobs:
@@ -16,40 +16,40 @@ jobs:
       - name: Setup Node
         uses: actions/setup-node@v4
         with:
-          node-version: '20'
+          node-version: '18'
+          cache: 'npm'
 
       - name: Install deps
-        run: npm install
+        run: npm ci
 
       - name: Build web
         run: npm run build
 
-      - name: Add Android platform
-        run: npx cap add android
-
-      - name: Sync Capacitor
+      # Pridá/synchronizuje Android platformu (dôležité je, že máme @capacitor/cli v devDeps)
+      - name: Sync Capacitor (Android)
         run: npx cap sync android
 
-      - name: Patch Android Manifest (add CAMERA permission)
+      # (Nepovinné) – istota, že CAMERA je v manifeste
+      - name: Ensure CAMERA permission
         run: |
-          XML=android/app/src/main/AndroidManifest.xml
-          if ! grep -q 'xmlns:tools=' "$XML"; then
-            sed -i '0,/<manifest /s//<manifest xmlns:tools="http:\/\/schemas.android.com\/tools" /' "$XML"
+          MANIFEST="android/app/src/main/AndroidManifest.xml"
+          if ! grep -q 'android.permission.CAMERA' "$MANIFEST"; then
+            sed -i 's#<manifest #<manifest xmlns:tools="http://schemas.android.com/tools" #' "$MANIFEST"
+            sed -i 's#<application#<uses-permission android:name="android.permission.CAMERA"/>\n    <application#' "$MANIFEST"
           fi
-          if ! grep -q 'android.permission.CAMERA' "$XML"; then
-            sed -i '0,/<manifest[^>]*>/s//&\n    <uses-permission android:name="android.permission.CAMERA" \/>/' "$XML"
-          fi
+
+      - name: Setup Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '17'
 
       - name: Setup Android SDK
         uses: android-actions/setup-android@v3
-        with:
-          api-level: 34
-          build-tools: 34.0.0
 
       - name: Build debug APK
-        run: |
-          cd android
-          ./gradlew assembleDebug
+        working-directory: android
+        run: ./gradlew assembleDebug
 
       - name: Upload APK artifact
         uses: actions/upload-artifact@v4

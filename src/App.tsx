@@ -1,411 +1,449 @@
-import React, { CSSProperties, useEffect, useRef, useState } from "react";
-import { BrowserMultiFormatReader, IScannerControls } from "@zxing/browser";
-import { BarcodeFormat, DecodeHintType } from "@zxing/library";
+import React, { useEffect, useMemo, useRef, useState } from 'react'
 
-// === nastav svoju Vercel URL (končí /api/evaluate) ===
-const EVAL_URL = "https://radka-celiakia.vercel.app/api/evaluate";
+// ====== KONŠTANTY ===========================================================
+type EvalStatus = 'safe' | 'avoid' | 'maybe'
+const EVAL_URL = 'https://radka-celiakia.vercel.app/api/eval' // <— TVOJ AI endpoint
 
-type EvalStatus = "safe" | "avoid" | "maybe";
-type HistoryItem = { code: string; brand: string; name: string; status: EvalStatus; ts: number };
+// timeout helper
+function withTimeout<T>(p: Promise<T>, ms = 12000): Promise<T> {
+  return new Promise((resolve, reject) => {
+    const t = setTimeout(() => reject(new Error('AI timeout')), ms)
+    p.then((v) => { clearTimeout(t); resolve(v) }).catch((e) => { clearTimeout(t); reject(e) })
+  })
+}
 
-const ACCENT = "#7c3aed";
+// ====== UI POMOCNÉ VECI =====================================================
+function Badge({ children, tone = 'neutral' }: { children: React.ReactNode, tone?: 'neutral'|'good'|'warn'|'bad' }) {
+  const map: Record<typeof tone, string> = {
+    neutral: '#eef2ff',
+    good: '#dcfce7',
+    warn: '#fef3c7',
+    bad:  '#fee2e2',
+  } as any
+  const color: Record<typeof tone, string> = {
+    neutral: '#4338ca',
+    good: '#166534',
+    warn: '#a16207',
+    bad:  '#b91c1c',
+  } as any
+  return (
+    <span style={{
+      background: map[tone],
+      color: color[tone],
+      padding: '6px 10px',
+      borderRadius: 999,
+      fontWeight: 600,
+      fontSize: 13,
+      border: '1px solid rgba(0,0,0,0.06)',
+    }}>{children}</span>
+  )
+}
 
-// ===== Pretty styles =====
-const page: CSSProperties = { minHeight: "100vh", background: "linear-gradient(180deg,#f8fafc,#f6f5ff)", padding: 16 };
-const container: CSSProperties = { maxWidth: 820, margin: "0 auto" };
-const card = (extra?: CSSProperties): CSSProperties => ({
-  background: "#fff", border: "1px solid #e5e7eb", borderRadius: 16, padding: 16,
-  boxShadow: "0 10px 15px -3px rgba(0,0,0,0.08), 0 4px 6px -4px rgba(0,0,0,0.06)", ...extra
-});
-const chip = (extra?: CSSProperties): CSSProperties => ({
-  fontSize: 12, background: "#f5f3ff", color: "#4c1d95", padding: "6px 10px",
-  borderRadius: 999, border: "1px solid #ddd6fe", fontWeight: 600, ...extra
-});
-const btnBase: CSSProperties = {
-  padding: "10px 14px", borderRadius: 12, border: "1px solid #e5e7eb",
-  cursor: "pointer", transition: "transform .06s, box-shadow .12s, background .2s"
-};
-const btn = (extra?: CSSProperties): CSSProperties => ({
-  ...btnBase, background: "#fff", boxShadow: "0 1px 2px rgba(16,24,40,.06), 0 1px 1px rgba(16,24,40,.04)", ...extra
-});
-const btnPrimary = (disabled?: boolean): CSSProperties => ({
-  ...btnBase,
-  background: disabled ? "linear-gradient(90deg,#e5e7eb,#e5e7eb)" : `linear-gradient(90deg, ${ACCENT}, #a78bfa)`,
-  color: disabled ? "#6b7280" : "#fff", border: "none",
-  boxShadow: disabled ? "none" : "0 10px 15px -3px rgba(124,58,237,.35)"
-});
+function SectionCard({ children }: { children: React.ReactNode }) {
+  return (
+    <div style={{
+      background: '#fff',
+      border: '1px solid #eceef3',
+      borderRadius: 16,
+      padding: 14,
+      boxShadow: '0 6px 24px rgba(16,24,40,.06)'
+    }}>{children}</div>
+  )
+}
 
-// ===== App =====
+// ====== APP ================================================================
 export default function App() {
-  const [scanning, setScanning] = useState(false);
-  const [barcode, setBarcode] = useState("");
-  const [loading, setLoading] = useState(false);
-  const [error, setError] = useState<string | null>(null);
+  const [scanning, setScanning] = useState(false)
+  const [useFront, setUseFront] = useState(false)
+  const [barcode, setBarcode] = useState('')
+  const [loading, setLoading] = useState(false)
+  const [error, setError] = useState<string | null>(null)
 
-  const [product, setProduct] = useState<any>(null);
-  const [evaluation, setEvaluation] = useState<EvalStatus | null>(null);
-  const [notes, setNotes] = useState<string[]>([]);
+  const [product, setProduct] = useState<any>(null)
+  const [evaluation, setEvaluation] = useState<EvalStatus | null>(null)
+  const [notes, setNotes] = useState<string[]>([])
 
-  const [history, setHistory] = useState<HistoryItem[]>(() => {
-    try { return JSON.parse(localStorage.getItem("radka_scan_history") || "[]") } catch { return [] }
-  });
+  const [history, setHistory] = useState<any[]>(() => {
+    try { return JSON.parse(localStorage.getItem('radka_scan_history') || '[]') } catch { return [] }
+  })
 
-  const [devices, setDevices] = useState<MediaDeviceInfo[]>([]);
-  const [deviceId, setDeviceId] = useState<string | null>(null);
-  const [preferBack, setPreferBack] = useState(true);
-
-  const videoRef = useRef<HTMLVideoElement | null>(null);
-  const controlsRef = useRef<IScannerControls | null>(null);
-  const lastCodeRef = useRef<string | null>(null);
-  const lastScanTsRef = useRef(0);
-
-  useEffect(() => {
-    try { localStorage.setItem("radka_scan_history", JSON.stringify(history.slice(0,50))) } catch {}
-  }, [history]);
-
-  useEffect(() => {
-    (async () => {
-      try {
-        const all = await (navigator.mediaDevices?.enumerateDevices?.() ?? Promise.resolve([] as MediaDeviceInfo[]));
-        const cams = all.filter(d => d.kind === "videoinput");
-        setDevices(cams);
-        if (!deviceId) {
-          const back = cams.find(c => /back|rear|environment/i.test(c.label));
-          const front = cams.find(c => /front|user/i.test(c.label));
-          setDeviceId((preferBack ? back?.deviceId : front?.deviceId) ?? cams[0]?.deviceId ?? null);
-        }
-      } catch {/* ignore */}
-    })();
-  }, [preferBack]);
-
-  useEffect(() => {
-    if (!scanning) return;
-
-    let stopped = false;
-
-    const start = async () => {
-      try {
-        const formats = [BarcodeFormat.EAN_13, BarcodeFormat.EAN_8, BarcodeFormat.UPC_A, BarcodeFormat.UPC_E, BarcodeFormat.CODE_128];
-        const hints = new Map<DecodeHintType, any>();
-        hints.set(DecodeHintType.POSSIBLE_FORMATS, formats);
-
-        // ✅ žiadne číslo 400 – to spôsobovalo TS chybu
-        const reader = new BrowserMultiFormatReader(hints);
-
-        const id = deviceId ?? undefined;
-
-        controlsRef.current = await reader.decodeFromVideoDevice(id, videoRef.current!, (result) => {
-          if (!result || stopped) return;
-          const code = result.getText().trim();
-          if (!code) return;
-          const now = Date.now();
-          if (code === lastCodeRef.current && now - lastScanTsRef.current < 1200) return;
-
-          lastCodeRef.current = code;
-          lastScanTsRef.current = now;
-
-          stopped = true;
-          try { controlsRef.current?.stop(); } catch {}
-          setScanning(false);
-          setBarcode(code);
-          fetchProduct(code);
-        });
-      } catch (e) {
-        setError("Nepodarilo sa spustiť kameru.");
-        setScanning(false);
-      }
-    };
-
-    start();
-
-    return () => { try { controlsRef.current?.stop(); } catch {} };
-  }, [scanning, deviceId]);
-
-  function toggleCamera() {
-    if (!devices.length) return;
-    setPreferBack(v => !v);
-    setDeviceId(null);
-    if (scanning) setScanning(false);
+  // DEBUG panel – uvidíš posledný request/response z AI aj z mobilu
+  const [debugOpen, setDebugOpen] = useState(false)
+  const [debugLog, setDebugLog] = useState<string[]>([])
+  function log(line: string) {
+    setDebugLog((d) => [new Date().toLocaleTimeString() + '  ' + line, ...d].slice(0, 50))
   }
 
+  // kamera
+  const videoRef = useRef<HTMLVideoElement | null>(null)
+  const streamRef = useRef<MediaStream | null>(null)
+  const readerRef = useRef<any>(null) // ZXing reader
+
+  useEffect(() => {
+    localStorage.setItem('radka_scan_history', JSON.stringify(history.slice(0, 50)))
+  }, [history])
+
+  // spustenie/vypnutie kamery
+  useEffect(() => {
+    let cancelled = false
+    async function start() {
+      if (!scanning) return
+      setError(null)
+      try {
+        const constraints: MediaStreamConstraints = {
+          video: useFront ? { facingMode: 'user' } : { facingMode: { ideal: 'environment' } },
+          audio: false
+        }
+        const stream = await navigator.mediaDevices.getUserMedia(constraints)
+        if (cancelled) { stream.getTracks().forEach(t => t.stop()); return }
+        streamRef.current = stream
+        if (videoRef.current) {
+          videoRef.current.srcObject = stream
+          await videoRef.current.play()
+        }
+        // lazy import zxing
+        const { BrowserMultiFormatReader } = await import('@zxing/browser')
+        readerRef.current = new BrowserMultiFormatReader()
+
+        // kontinuálne čítanie – keď niečo nájde, vypne kameru a spracuje
+        const decodeLoop = async () => {
+          if (!readerRef.current || !videoRef.current) return
+          try {
+            const res = await readerRef.current.decodeOnceFromVideoElement(videoRef.current)
+            const code = res.getText()
+            handleCode(code)
+          } catch (e: any) {
+            // ignoruj, skúšaj ďalej, ak stále skenujeme
+            if (scanning && videoRef.current) requestAnimationFrame(decodeLoop)
+          }
+        }
+        requestAnimationFrame(decodeLoop)
+      } catch (e: any) {
+        setError('Kamera sa nedá spustiť: ' + (e?.message || e))
+      }
+    }
+    async function stop() {
+      if (readerRef.current?.reset) { try { readerRef.current.reset() } catch {} }
+      readerRef.current = null
+      if (streamRef.current) {
+        streamRef.current.getTracks().forEach(t => t.stop())
+        streamRef.current = null
+      }
+      if (videoRef.current) {
+        videoRef.current.pause()
+        videoRef.current.srcObject = null
+      }
+    }
+    if (scanning) start()
+    else stop()
+    return () => { cancelled = true; stop() }
+  }, [scanning, useFront])
+
+  // spracovanie naskenovaného alebo zadaného kódu
+  async function handleCode(code: string) {
+    if (!code) return
+    setBarcode(code)
+    setScanning(false) // okamžite vypni kameru, nech to nečíta znova
+    await fetchProduct(code)
+  }
+
+  // OFF fetch + lokálne vyhodnotenie + prípadný AI fallback
   async function fetchProduct(code: string) {
-    if (!code) return;
-    setLoading(true); setError(null); setProduct(null); setEvaluation(null); setNotes([]);
-
+    setLoading(true); setError(null); setProduct(null); setEvaluation(null); setNotes([])
     try {
-      const res = await fetch(`https://world.openfoodfacts.org/api/v2/product/${encodeURIComponent(code)}.json`);
-      const ok = res.ok;
-      const data = ok ? await res.json() : null;
-
-      if (!ok || !data || data.status !== 1 || !data.product) {
-        await aiEvaluate(null);
-        return;
+      const res = await fetch(`https://world.openfoodfacts.org/api/v2/product/${code}.json`)
+      if (!res.ok) throw new Error('Chyba pripojenia k Open Food Facts')
+      const data = await res.json()
+      if (data.status !== 1 || !data.product) {
+        setError('Produkt sa nenašiel v databáze.')
+        return
       }
+      const p = data.product
+      setProduct(p)
 
-      const p = data.product;
-      setProduct(p);
+      // lokálne vyhodnotenie
+      const local = evaluateLocal(p)
+      setEvaluation(local.status)
+      setNotes(local.notes)
 
-      const ev = evaluateProduct(p);
-      setEvaluation(ev.status);
-      setNotes(ev.notes);
+      // história
+      setHistory(h => [{
+        code,
+        brand: p.brands || '',
+        name: p.product_name || p.generic_name || 'Neznámy produkt',
+        status: local.status,
+        ts: Date.now(),
+      }, ...h.filter(x => x.code !== code)].slice(0, 50))
 
-      if (ev.status === "maybe") {
-        await aiEvaluate(p);
+      // AI fallback
+      if (local.status === 'maybe') {
+        const ai = await fetchAI({
+          code,
+          name: p.product_name || p.generic_name || '',
+          ingredients: p.ingredients_text_sk || p.ingredients_text_cs || p.ingredients_text || '',
+          allergens: (p.allergens_hierarchy || []).map((t: string) => t.replace(/^.*:/,'')).join(', '),
+          lang: 'sk'
+        })
+        if (ai?.status) setEvaluation(ai.status as EvalStatus)
+        if (ai?.notes?.length) setNotes(ai.notes)
       }
-
-      setHistory(h => ([
-        { code, brand: p.brands || "", name: p.product_name || p.generic_name || "Neznámy produkt", status: ev.status, ts: Date.now() },
-        ...h.filter(x => x.code !== code)
-      ]).slice(0,50));
     } catch (e: any) {
-      setError(e?.message || "Neznáma chyba");
+      setError(e?.message || 'Neznáma chyba')
     } finally {
-      setLoading(false);
+      setLoading(false)
     }
   }
 
-  async function aiEvaluate(p: any | null) {
-    try {
-      if (!EVAL_URL || EVAL_URL.includes("<tvoje-vercel>")) return;
-      const payload = p ? {
-        name: p.product_name || p.generic_name || "",
-        brand: p.brands || "",
-        ingredients: p.ingredients_text_sk || p.ingredients_text || p.ingredients_text_en || "",
-        labels: p.labels || (p.labels_tags || []).join(", "),
-        traces: p.traces || (p.traces_tags || []).join(", "),
-      } : { name: "", brand: "", ingredients: "", labels: "", traces: "" };
+  // lokálne (rýchle) vyhodnotenie
+  function evaluateLocal(p: any): { status: EvalStatus, notes: string[] } {
+    const notes: string[] = []
 
-      const r = await fetch(EVAL_URL, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload) });
-      const ai = await r.json();
+    const allergenTags: string[] = p.allergens_tags || []
+    const hasGlutenTag = allergenTags.some((t) => /(^|:)gluten$/i.test(t))
+    const hasMilkTag = allergenTags.some((t) => /(^|:)milk$/i.test(t))
 
-      if (ai?.status) {
-        setEvaluation(ai.status as EvalStatus);
-        if (Array.isArray(ai.notes) && ai.notes.length) {
-          setNotes(prev => [...prev, ...ai.notes]);
-        } else {
-          setNotes(prev => [...prev, "Doplnené AI hodnotením."]);
-        }
-      }
-    } catch {
-      // ticho
-    }
-  }
+    const ingrAnalysis = p.ingredients_analysis_tags || []
+    const maybeGluten = ingrAnalysis.some((t: string) => /may-contain-gluten/i.test(t))
 
-  function evaluateProduct(p: any): { status: EvalStatus; notes: string[] } {
-    const notes: string[] = [];
+    const ingredientsText = (p.ingredients_text || p.ingredients_text_en || p.ingredients_text_sk || '').toLowerCase()
+    const milkTerms = ['mlieko','mliecna bielkovina','mliečna bielkovina','srvátka','whey','casein','kazein','kazeín','maslo','smotana','syr','tvaroh','mliečny']
+    const glutenTerms = ['lepok','pšenica','psenica','wheat','jačmeň','jacmen','barley','raž','raz','rye','špalda','spelta','spelt','ovos']
+    const hasMilkText = milkTerms.some((t) => ingredientsText.includes(t))
+    const hasGlutenText = glutenTerms.some((t) => ingredientsText.includes(t))
 
-    const allergenTags: string[] = p.allergens_tags || [];
-    const hasGlutenTag = allergenTags.some((t: string) => /(^|:)gluten$/i.test(t));
-    const hasMilkTag = allergenTags.some((t: string) => /(^|:)milk$/i.test(t));
+    const claims = `${p.labels || ''} ${p.traces || ''} ${(p.traces_tags || []).join(' ')}`.toLowerCase()
+    const saysGlutenFree = /gluten[- ]?free|bez lepku|bezlepkov/i.test(claims)
 
-    const ingrAnalysis: string[] = p.ingredients_analysis_tags || [];
-    const maybeGluten = ingrAnalysis.some((t: string) => /may-contain-gluten/i.test(t));
-
-    const ingredientsText = (p.ingredients_text_sk || p.ingredients_text_cs || p.ingredients_text || p.ingredients_text_en || "")
-      .toString().toLowerCase();
-
-    const milkTerms = ["mlieko","mliecna bielkovina","mliečna bielkovina","srvátka","whey","casein","kazein","kazeín","maslo","smotana","syr","tvaroh","mliečny"];
-    const glutenTerms = ["lepok","pšenica","psenica","wheat","jačmeň","jacmen","barley","raž","raz","rye","špalda","spelta","spelt","ovos"];
-    const hasMilkText = milkTerms.some(t => ingredientsText.includes(t));
-    const hasGlutenText = glutenTerms.some(t => ingredientsText.includes(t));
-
-    const tracesText = (p.traces || (p.traces_tags || []).join(", ") || "").toString().toLowerCase();
-
-    const labelsTags: string[] = p.labels_tags || [];
-    const isLabeledGF = labelsTags.some((t) =>
-      /(^|:)(gluten[- ]?free|en:gluten[- ]?free)$/.test(String(t).toLowerCase())
-    );
-    const nameText = `${p.product_name || ""} ${p.generic_name || ""}`.toLowerCase();
-    const claimsText = `${p.labels || ""} ${p.traces || ""} ${(p.traces_tags || []).join(" ")} ${nameText}`.toLowerCase();
-    const saysGF = /gluten[- ]?free|bez[\s-]?lepku|bezlepkov/i.test(claimsText);
-
-    let status: EvalStatus = "maybe";
-
+    let status: EvalStatus = 'maybe'
     if (hasMilkTag || hasMilkText) {
-      status = "avoid";
-      notes.push("Obsahuje mliečnu bielkovinu (napr. srvátka/kazeín).");
+      status = 'avoid'
+      notes.push('Obsahuje mliečnu bielkovinu (napr. srvátka/kazeín).')
     }
     if (hasGlutenTag || hasGlutenText) {
-      status = "avoid";
-      notes.push("Obsahuje lepok alebo obilniny s lepkovými bielkovinami.");
+      status = 'avoid'
+      notes.push('Obsahuje lepok alebo obilniny s lepkovými bielkovinami.')
     }
-
     if (!hasMilkTag && !hasMilkText && !hasGlutenTag && !hasGlutenText) {
-      if ((isLabeledGF || saysGF) && !/gluten|wheat|barley|rye/.test(tracesText) && !maybeGluten) {
-        status = "safe";
-        notes.push("Deklarované ako bezlepkové (štítok/produkt) a bez mlieka.");
+      if (saysGlutenFree && !maybeGluten) {
+        status = 'safe'
+        notes.push('Deklarované ako bezlepkové a bez mlieka v ingredienciách.')
       } else {
-        status = "maybe";
-        notes.push("Nenašli sa rizikové alergény, ale deklarácia nie je jasná. Skontroluj etiketu.");
+        status = 'maybe'
+        notes.push('Nenašli sa rizikové alergény, ale deklarácia nie je jasná.')
       }
     }
-
+    const tracesText = (p.traces || (p.traces_tags || []).join(', ') || '').toLowerCase()
     if (/milk/.test(tracesText)) {
-      notes.push("Upozornenie: môže obsahovať stopy mlieka.");
-      if (status === "safe") status = "maybe";
+      notes.push('Upozornenie: môže obsahovať stopy mlieka.')
+      if (status === 'safe') status = 'maybe'
     }
     if (/gluten|wheat|barley|rye/.test(tracesText)) {
-      notes.push("Upozornenie: môže obsahovať stopy lepku.");
-      if (status === "safe") status = "maybe";
+      notes.push('Upozornenie: môže obsahovať stopy lepku.')
+      if (status === 'safe') status = 'maybe'
     }
-
-    return { status, notes };
+    return { status, notes }
   }
 
+  // volanie AI
+  async function fetchAI(payload: {
+    code: string
+    name: string
+    ingredients: string
+    allergens: string
+    lang: 'sk'|'cs'
+  }): Promise<{status?: EvalStatus, notes: string[]}|null> {
+    try {
+      log('AI → POST ' + EVAL_URL)
+      log('AI req: ' + JSON.stringify(payload))
+      const res = await withTimeout(fetch(EVAL_URL, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+      }), 12000)
+      const text = await res.text()
+      log('AI status ' + res.status + ', body: ' + text)
+      if (!res.ok) throw new Error('AI ' + res.status)
+      const data = JSON.parse(text)
+      // očakávaný tvar: { status: 'safe'|'avoid'|'maybe', notes: string[] }
+      return {
+        status: (data.status === 'safe' || data.status === 'avoid' || data.status === 'maybe') ? data.status : undefined,
+        notes: Array.isArray(data.notes) ? data.notes : [],
+      }
+    } catch (e: any) {
+      log('AI error: ' + (e?.message || e))
+      return null
+    }
+  }
+
+  // status badge
   function statusBadge(s: EvalStatus | null) {
-    if (s === "safe")  return <span style={chip({ background:"#ecfdf5", color:"#065f46", border:"1px solid #a7f3d0" })}>Bezpečné</span>;
-    if (s === "avoid") return <span style={chip({ background:"#fef2f2", color:"#991b1b", border:"1px solid #fecaca" })}>Vyhnúť sa</span>;
-    if (s === "maybe") return <span style={chip({ background:"#fffbeb", color:"#92400e", border:"1px solid #fde68a" })}>Neisté</span>;
-    return <span style={chip({ background:"#f3f4f6", color:"#374151" })}>Zatiaľ nič</span>;
+    if (s === 'safe') return <Badge tone="good">Bezpečné</Badge>
+    if (s === 'avoid') return <Badge tone="bad">Vyhnúť sa</Badge>
+    if (s === 'maybe') return <Badge tone="warn">Neisté</Badge>
+    return <Badge>—</Badge>
   }
 
-  return (
-    <div style={page}>
-      <div style={container}>
-        <header style={{
-          display:"flex", justifyContent:"space-between", alignItems:"center", marginBottom:16, padding:12,
-          borderRadius:16, background:"linear-gradient(90deg, rgba(124,58,237,0.10), rgba(167,139,250,0.10))",
-          border:"1px solid #e5e7eb", boxShadow:"0 10px 15px -3px rgba(0,0,0,0.06), 0 4px 6px -4px rgba(0,0,0,0.05)"
-        }}>
-          <h1 style={{ fontSize: 26, fontWeight: 800, letterSpacing: 0.2 }}>Radka Scanner</h1>
-          <div style={{ display:"flex", gap:8, alignItems:"center" }}>
-            <button onClick={toggleCamera} disabled={!devices.length} style={btn()} aria-label="Prepnúť kameru">
-              Prepnúť kameru
-            </button>
-            <label style={{ display:"flex", alignItems:"center", gap:8, padding:"6px 10px",
-              border:"1px solid #e5e7eb", borderRadius:12, background:"#fff", fontWeight:600 }}>
-              <input
-                type="checkbox"
-                checked={scanning}
-                onChange={(e) => {
-                  if (!e.target.checked) { try { controlsRef.current?.stop(); } catch {} }
-                  if (e.target.checked) { lastCodeRef.current = null; lastScanTsRef.current = 0; }
-                  setScanning(e.target.checked);
-                }}
-              />
-              <span>Kamera</span>
-            </label>
-          </div>
-        </header>
+  // vyčistenie histórie
+  function clearHistory() {
+    setHistory([])
+    localStorage.removeItem('radka_scan_history')
+  }
 
-        <section style={card()}>
-          <div style={{ fontWeight: 700, marginBottom: 8 }}>Skenovanie čiarového kódu</div>
+  // ====== RENDER ============================================================
+  return (
+    <div style={{minHeight:'100vh', background:'#f6f7fb', padding:'16px'}}>
+      <div style={{maxWidth: 860, margin:'0 auto'}}>
+        {/* header */}
+        <div style={{
+          background:'linear-gradient(180deg,#ede9fe, #f7f7ff)',
+          border:'1px solid #eceef3', borderRadius:20, padding:16, marginBottom:14,
+          display:'grid', gridTemplateColumns:'1fr auto auto', gap:10, alignItems:'center'
+        }}>
+          <div style={{opacity:.35, fontWeight:800, fontSize:36, lineHeight:1.1}}>Radka<br/>Scanner</div>
+          <button onClick={()=>setUseFront(s=>!s)} style={{
+            background:'#fff', border:'1px solid #e5e7eb', borderRadius:14, padding:'10px 14px', fontWeight:600
+          }}>Prepnúť kameru</button>
+          <label style={{display:'flex', alignItems:'center', gap:10, background:'#fff', border:'1px solid #e5e7eb', borderRadius:14, padding:'10px 14px'}}>
+            <input type="checkbox" checked={scanning} onChange={e=>setScanning(e.target.checked)} />
+            <span style={{opacity:.6,fontWeight:700}}>Kamera</span>
+          </label>
+        </div>
+
+        {/* scanner panel */}
+        <SectionCard>
+          <div style={{fontWeight:800, fontSize:20, marginBottom:8, color:'#111827', opacity:.9}}>Skenovanie čiarového kódu</div>
 
           {scanning && (
-            <div style={{
-              borderRadius:14, overflow:"hidden", border:"1px solid #e5e7eb",
-              background:"#000", aspectRatio:"16/9", marginBottom:10, position:"relative"
-            }}>
-              <video ref={videoRef} style={{ width:"100%", height:"100%", objectFit:"cover" }} muted playsInline autoPlay />
-              <div style={{ position:"absolute", inset:0, pointerEvents:"none",
-                boxShadow:"inset 0 0 0 2px rgba(124,58,237,.55), inset 0 0 0 9999px rgba(0,0,0,.10)" }}/>
+            <div style={{borderRadius:12, overflow:'hidden', border:'1px solid #e5e7eb', background:'#000', aspectRatio:'16/9', marginBottom:8}}>
+              <video ref={videoRef} style={{width:'100%', height:'100%', objectFit:'cover'}} />
             </div>
           )}
 
-          <div style={{ display:"grid", gridTemplateColumns:"1fr auto", gap:8 }}>
+          <div style={{display:'grid', gridTemplateColumns:'1fr auto', gap:10}}>
             <input
               placeholder="Zadaj EAN/UPC kód"
               value={barcode}
-              onChange={(e) => setBarcode(e.target.value)}
-              onKeyDown={(e) => { if (e.key === "Enter" && barcode.trim()) fetchProduct(barcode.trim()); }}
-              style={{ padding:12, border:"1px solid #e5e7eb", borderRadius:12 }}
-              inputMode="numeric"
+              onChange={e=>setBarcode(e.target.value)}
+              onKeyDown={e => { if (e.key === 'Enter' && barcode) handleCode(barcode) }}
+              style={{padding:'12px 14px', border:'1px solid #e5e7eb', borderRadius:12, fontSize:16, background:'#fff'}}
             />
-            <button onClick={() => barcode.trim() && fetchProduct(barcode.trim())} disabled={!barcode.trim() || loading} style={btnPrimary(!barcode.trim() || loading)}>
-              {loading ? "Načítavam…" : "Vyhľadať"}
+            <button
+              onClick={()=>barcode && handleCode(barcode)}
+              disabled={!barcode || loading}
+              style={{padding:'12px 18px', borderRadius:12, border:'1px solid #e5e7eb',
+                      background: loading ? '#f3f4f6' : 'linear-gradient(135deg,#7c3aed,#8b5cf6)',
+                      color: loading ? '#111827' : '#fff', fontWeight:700}}>
+              {loading ? 'Načítavam…' : 'Vyhľadať'}
             </button>
           </div>
 
-          <div style={{ fontSize:12, color:"#6b7280", marginTop:8 }}>
+          <div style={{fontSize:13, color:'#6b7280', marginTop:8}}>
             Dáta: Open Food Facts → ak je neisté, doplní AI z tvojho endpointu.
           </div>
 
           {error && (
-            <div style={{ marginTop:10, padding:10, borderRadius:12, border:"1px solid #fecaca", background:"#fee2e2", color:"#991b1b" }}>
+            <div style={{marginTop:10, padding:'10px 12px', borderRadius:12, border:'1px solid #fecaca', background:'#fee2e2', color:'#991b1b'}}>
               {error}
             </div>
           )}
-        </section>
+        </SectionCard>
 
+        {/* výsledok */}
         {product && (
-          <section style={card({ marginTop: 12 })}>
-            <div style={{ display:"flex", justifyContent:"space-between", gap:10, flexWrap:"wrap" }}>
-              <div style={{ fontWeight: 700 }}>
-                {product.product_name || product.generic_name || "Neznámy produkt"}
-              </div>
-              <div>{statusBadge(evaluation)}</div>
+          <div style={{height:10}} />
+        )}
+        {product && (
+          <SectionCard>
+            <div style={{display:'flex', justifyContent:'space-between', alignItems:'center', gap:12, flexWrap:'wrap'}}>
+              <div style={{fontWeight:800, fontSize:20}}>{product.product_name || product.generic_name || 'Neznámy produkt'}</div>
+              {statusBadge(evaluation)}
             </div>
-            <div style={{ fontSize: 13, color: "#6b7280", marginTop: 4 }}>
-              Kód: {product.code}
-            </div>
+            <div style={{fontSize:13, color:'#6b7280', marginTop:4}}>Kód: {product.code}</div>
 
-            {notes.length > 0 && (
-              <ul style={{ marginLeft: 18, lineHeight: 1.45, marginTop: 8 }}>
-                {notes.map((n, i) => (<li key={i} style={{ fontSize: 14 }}>{n}</li>))}
+            {notes.length>0 && (
+              <ul style={{marginLeft:18, lineHeight:1.5, marginTop:8}}>
+                {notes.map((n, i) => <li key={i} style={{fontSize:14}}>{n}</li>)}
               </ul>
             )}
 
-            <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr", gap:12, marginTop:8 }}>
+            <div style={{display:'grid', gridTemplateColumns:'1fr 1fr', gap:12, marginTop:12}}>
               <div>
-                <div style={{ fontWeight: 700, marginBottom: 6 }}>Alergény (z databázy)</div>
-                <div style={{ display:"flex", gap:6, flexWrap:"wrap" }}>
+                <div style={{fontWeight:700, marginBottom:6}}>Alergény (z databázy)</div>
+                <div style={{display:'flex', gap:6, flexWrap:'wrap'}}>
                   {(product.allergens_hierarchy || []).length
-                    ? (product.allergens_hierarchy || []).map((t:string) => <span key={t} style={chip()}>{t.replace(/^.*:/,"")}</span>)
-                    : <span style={{ fontSize: 13, color: "#6b7280" }}>Neuvádzané</span>}
+                    ? (product.allergens_hierarchy || []).map((t: string) => (
+                      <span key={t} style={{fontSize:12, background:'#f3f4f6', padding:'4px 8px', borderRadius:999, border:'1px solid #e5e7eb'}}>{t.replace(/^.*:/,'')}</span>
+                    ))
+                    : <span style={{fontSize:13, color:'#6b7280'}}>Neuvádzané</span>}
                 </div>
               </div>
               <div>
-                <div style={{ fontWeight: 700, marginBottom: 6 }}>Ingrediencie (sk/cs/en)</div>
-                <div style={{ fontSize: 13, maxHeight: 120, overflow: "auto", padding: 10, borderRadius: 12, background: "#f9fafb", border: "1px solid #e5e7eb" }}>
-                  {product.ingredients_text_sk || product.ingredients_text_cs || product.ingredients_text_en || product.ingredients_text || "Neuvádzané"}
+                <div style={{fontWeight:700, marginBottom:6}}>Ingrediencie (sk/cs/en)</div>
+                <div style={{fontSize:13, maxHeight:120, overflow:'auto', padding:8, borderRadius:10, background:'#f9fafb', border:'1px solid #e5e7eb'}}>
+                  {product.ingredients_text_sk || product.ingredients_text_cs || product.ingredients_text_en || product.ingredients_text || 'Neuvádzané'}
                 </div>
               </div>
             </div>
 
-            <div style={{ fontSize: 12, color: "#6b7280", marginTop: 8 }}>
-              Zdroj: Open Food Facts • Posledná aktualizácia:{" "}
-              {product.last_modified_t ? new Date(product.last_modified_t * 1000).toLocaleDateString() : "neuvedené"}
+            <div style={{fontSize:12, color:'#6b7280', marginTop:10}}>
+              Zdroj: Open Food Facts • Posledná aktualizácia: {product.last_modified_t ? new Date(product.last_modified_t*1000).toLocaleDateString() : 'neuvedené'}
             </div>
-          </section>
+          </SectionCard>
         )}
 
-        <History history={history} onPick={(code) => fetchProduct(code)} />
+        {/* história */}
+        <div style={{height:10}} />
+        <SectionCard>
+          <div style={{fontWeight:800, fontSize:18, marginBottom:6, color:'#0f172a'}}>Posledné skeny</div>
+          {history.length === 0 ? (
+            <div style={{fontSize:13, color:'#6b7280'}}>Zatiaľ prázdne</div>
+          ) : (
+            <div style={{display:'flex', flexDirection:'column', gap:8, marginTop:6}}>
+              {history.map((h) => (
+                <button key={h.code} onClick={() => handleCode(h.code)} style={{
+                  textAlign:'left', border:'1px solid #eceef3', borderRadius:12, padding:10, background:'#fff',
+                  display:'flex', justifyContent:'space-between', alignItems:'center'
+                }}>
+                  <div>
+                    <div style={{fontWeight:700}}>{h.name}</div>
+                    <div style={{fontSize:12, color:'#6b7280'}}>{h.brand} • {h.code}</div>
+                  </div>
+                  <div>
+                    {h.status==='safe' ? <Badge tone="good">Bezpečné</Badge>
+                     : h.status==='avoid' ? <Badge tone="bad">Vyhnúť sa</Badge>
+                     : <Badge tone="warn">Neisté</Badge>}
+                  </div>
+                </button>
+              ))}
+            </div>
+          )}
+          <div style={{marginTop:10}}>
+            <button onClick={clearHistory} style={{padding:'8px 12px', borderRadius:10, border:'1px solid #e5e7eb'}}>Vymazať históriu</button>
+          </div>
+        </SectionCard>
+
+        {/* DEBUG panel */}
+        <div style={{height:10}} />
+        <SectionCard>
+          <div style={{display:'flex', justifyContent:'space-between', alignItems:'center'}}>
+            <div style={{fontWeight:800}}>Debug (AI volanie)</div>
+            <button onClick={()=>setDebugOpen(d=>!d)} style={{border:'1px solid #e5e7eb', borderRadius:8, padding:'6px 10px', background:'#fff'}}>
+              {debugOpen ? 'Skryť' : 'Zobraziť'}
+            </button>
+          </div>
+          {debugOpen && (
+            <div style={{marginTop:8, maxHeight:180, overflow:'auto', fontFamily:'ui-monospace, SFMono-Regular, Menlo, monospace', fontSize:12, background:'#f9fafb', border:'1px solid #e5e7eb', borderRadius:8, padding:8}}>
+              {debugLog.length === 0 ? <div style={{color:'#6b7280'}}>Žiadne záznamy…</div> :
+                debugLog.map((l, i) => <div key={i} style={{whiteSpace:'pre-wrap'}}>{l}</div>)
+              }
+            </div>
+          )}
+        </SectionCard>
+
+        <div style={{textAlign:'center', fontSize:12, color:'#6b7280', paddingTop:12}}>
+          Toto je pomocný nástroj. Pri nejasnostiach vždy skontroluj etiketu výrobku.
+        </div>
       </div>
     </div>
-  );
-}
-
-function History({ history, onPick }: { history: HistoryItem[]; onPick: (code: string) => void }) {
-  return (
-    <section style={card({ marginTop: 12 })}>
-      <div style={{ fontWeight: 700, display: "flex", alignItems: "center", gap: 8 }}>Posledné skeny</div>
-      {history.length === 0 ? (
-        <div style={{ fontSize: 13, color: "#6b7280" }}>Zatiaľ prázdne</div>
-      ) : (
-        <div style={{ display: "flex", flexDirection: "column", gap: 8, marginTop: 8 }}>
-          {history.map((h) => (
-            <button
-              key={h.code}
-              onClick={() => onPick(h.code)}
-              style={{
-                ...btn(), textAlign: "left", borderRadius: 12, padding: 10,
-                display: "flex", justifyContent: "space-between", alignItems: "center"
-              }}
-            >
-              <div>
-                <div style={{ fontWeight: 700 }}>{h.name}</div>
-                <div style={{ fontSize: 12, color: "#6b7280" }}>{h.brand} • {h.code}</div>
-              </div>
-              <div style={{
-                fontSize: 12, padding: "6px 10px", borderRadius: 999, border: "1px solid #e5e7eb",
-                background: h.status === "safe" ? "#dcfce7" : h.status === "avoid" ? "#fee2e2" : "#fef3c7",
-              }}>
-                {h.status === "safe" ? "Bezpečné" : h.status === "avoid" ? "Vyhnúť sa" : "Neisté"}
-              </div>
-            </button>
-          ))}
-        </div>
-      )}
-    </section>
-  );
+  )
 }

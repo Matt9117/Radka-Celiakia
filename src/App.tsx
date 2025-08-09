@@ -1,5 +1,4 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react'
-// PRIAMY ZXing reader (nie hook):
 import {
   BrowserMultiFormatReader,
   DecodeHintType,
@@ -10,47 +9,31 @@ import {
 type EvalStatus = 'safe' | 'avoid' | 'maybe'
 
 export default function App() {
-  // UI / stav
+  // Kamera / sken
   const [scanning, setScanning] = useState(false)
   const [hasCamPermission, setHasCamPermission] = useState<boolean | null>(null)
   const [camError, setCamError] = useState<string | null>(null)
+  const [cameraId, setCameraId] = useState<string | undefined>(undefined)
+  const [torchOn, setTorchOn] = useState(false)
 
+  // Produkt / UI
   const [barcode, setBarcode] = useState('')
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [product, setProduct] = useState<any>(null)
   const [evaluation, setEvaluation] = useState<EvalStatus | null>(null)
   const [notes, setNotes] = useState<string[]>([])
-  const [cameraId, setCameraId] = useState<string | undefined>(undefined)
-  const [torchOn, setTorchOn] = useState(false)
-  const lastScanRef = useRef<{ code: string; at: number } | null>(null)
-
   const [history, setHistory] = useState<any[]>(() => {
     try { return JSON.parse(localStorage.getItem('radka_scan_history') || '[]') } catch { return [] }
   })
 
-  // video elementy a ZXing reader
-  const videoRef = useRef<HTMLVideoElement | null>(null)   // hlavný náhľad
-  const probeRef = useRef<HTMLVideoElement | null>(null)   // skryté „prebudenie“ autoplay/povolenia
+  // Refs
+  const videoRef = useRef<HTMLVideoElement | null>(null)   // náhľad kamery
+  const probeRef = useRef<HTMLVideoElement | null>(null)   // skryté video na „prebudenie“ autoplay/povolení
   const readerRef = useRef<BrowserMultiFormatReader | null>(null)
+  const lastScanRef = useRef<{ code: string; at: number } | null>(null)
 
-  // tolerantné nastavenie videa (preferuj zadnú kameru)
-  const constraints: MediaStreamConstraints = useMemo(() => ({
-    video: {
-      ...(cameraId ? { deviceId: { ideal: cameraId } as any } : {}),
-      facingMode: { ideal: 'environment' } as any,
-      focusMode: 'continuous' as any
-    }
-  }), [cameraId])
-
-  // pomocné – stopnúť stream
-  function stopVideoTracks() {
-    const ms = videoRef.current?.srcObject as MediaStream | undefined
-    ms?.getTracks().forEach(t => t.stop())
-    if (videoRef.current) videoRef.current.srcObject = null
-  }
-
-  // predvolenie zadnej kamery
+  // Preferuj zadnú kameru
   useEffect(() => {
     navigator.mediaDevices?.enumerateDevices?.().then(devs => {
       const cams = devs.filter(d => d.kind === 'videoinput')
@@ -61,7 +44,23 @@ export default function App() {
     }).catch(()=>{})
   }, [])
 
-  // zapnutie/vypnutie skenovania – získaj povolenie + spusti stream
+  // Tolerantné video constraints
+  const constraints: MediaStreamConstraints = useMemo(() => ({
+    video: {
+      ...(cameraId ? { deviceId: { ideal: cameraId } as any } : {}),
+      facingMode: { ideal: 'environment' } as any,
+      focusMode: 'continuous' as any
+    }
+  }), [cameraId])
+
+  // Stopni existujúci stream
+  function stopVideoTracks() {
+    const ms = videoRef.current?.srcObject as MediaStream | undefined
+    ms?.getTracks().forEach(t => t.stop())
+    if (videoRef.current) videoRef.current.srcObject = null
+  }
+
+  // Spusť/stopni kameru + reader podľa "scanning"
   useEffect(() => {
     if (!scanning) {
       readerRef.current?.reset()
@@ -71,7 +70,7 @@ export default function App() {
     (async () => {
       setCamError(null)
       try {
-        // 1) explicitné povolenie (pre WebView autoplay)
+        // 1) explicitné povolenie (pre Android WebView autoplay)
         const test = await navigator.mediaDevices.getUserMedia({ video: constraints.video as MediaTrackConstraints })
         setHasCamPermission(true)
         if (probeRef.current) {
@@ -80,7 +79,7 @@ export default function App() {
         }
         test.getTracks().forEach(t => t.stop())
 
-        // 2) skutočný stream do hlavného videa
+        // 2) stream do náhľadu
         const stream = await navigator.mediaDevices.getUserMedia({ video: constraints.video as MediaTrackConstraints })
         if (videoRef.current) {
           videoRef.current.srcObject = stream
@@ -90,7 +89,7 @@ export default function App() {
           try { await videoRef.current.play() } catch {}
         }
 
-        // 3) naštartuj ZXing reader priamo na tom istom videu
+        // 3) štart čítačky
         startReader()
       } catch (e:any) {
         setHasCamPermission(false)
@@ -103,7 +102,7 @@ export default function App() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [scanning, cameraId])
 
-  // pri zmene kamery reštartni reader + stream
+  // Pri zmene kamery reštartni stream + reader
   useEffect(() => {
     if (!scanning) return
     (async () => {
@@ -113,18 +112,17 @@ export default function App() {
         const stream = await navigator.mediaDevices.getUserMedia({ video: constraints.video as MediaTrackConstraints })
         if (videoRef.current) { videoRef.current.srcObject = stream; try { await videoRef.current.play() } catch {} }
         startReader()
-      } catch(e:any) {
+      } catch (e:any) {
         setCamError(e?.message || 'Nepodarilo sa prepnúť kameru.')
       }
     })()
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [cameraId])
 
-  // ZXing reader spúšťač
+  // ZXing reader
   function startReader() {
     if (!videoRef.current) return
 
-    // hints – zrýchlenie/lepšie formáty
     const hints = new Map()
     hints.set(DecodeHintType.POSSIBLE_FORMATS, [
       BarcodeFormat.EAN_13, BarcodeFormat.EAN_8,
@@ -152,13 +150,13 @@ export default function App() {
           reader.reset()
           fetchProduct(code)
         } else if (err && !(err instanceof NotFoundException)) {
-          // iné chyby ignoruj; NotFound = nenašlo v tomto frame
+          // iné chyby ignorujeme; NotFound = len nenašlo v tomto frame
         }
       }
     )
   }
 
-  // prepínač kamery
+  // Prepínanie kamery
   async function switchCamera() {
     try {
       const devs = await navigator.mediaDevices.enumerateDevices()
@@ -170,7 +168,7 @@ export default function App() {
     } catch {}
   }
 
-  // torch (svetlo)
+  // Torch (svetlo)
   async function toggleTorch() {
     try {
       const ms = videoRef.current?.srcObject as MediaStream | undefined
@@ -190,11 +188,12 @@ export default function App() {
     }
   }
 
-  // história
+  // História
   useEffect(() => {
     localStorage.setItem('radka_scan_history', JSON.stringify(history.slice(0,50)))
   }, [history])
 
+  // Fetch produktu + vyhodnotenie
   async function fetchProduct(code: string) {
     setLoading(true); setError(null); setProduct(null); setEvaluation(null); setNotes([])
     try {
@@ -237,7 +236,7 @@ export default function App() {
     let status:EvalStatus = 'maybe'
     if (hasMilkTag || hasMilkText) { status='avoid'; notes.push('Obsahuje mliečnu bielkovinu.') }
     if (hasGlutenTag || hasGlutenText) { status='avoid'; notes.push('Obsahuje lepok.') }
-    if (!hasMilkTag && !hasMilkText && !hasGlutenTag a && !hasGlutenText) { /* eslint-disable-line */
+    if (!hasMilkTag && !hasMilkText && !hasGlutenTag && !hasGlutenText) {
       if (saysGlutenFree && !maybeGluten) { status='safe'; notes.push('Deklarované ako bezlepkové a bez mlieka.') }
       else { status='maybe'; notes.push('Nenašli sa rizikové alergény, ale deklarácia nie je jasná.') }
     }
@@ -275,7 +274,7 @@ export default function App() {
 
       {camError && <div className="card alert-bad">{camError}</div>}
 
-      {/* skryté video na prebudenie autoplay/povolení */}
+      {/* skryté video na „prebudenie“ autoplay/povolení */}
       <video ref={probeRef} playsInline autoPlay muted style={{display:'none'}} />
 
       {scanning && (
@@ -375,4 +374,4 @@ export default function App() {
       <div className="footer-note">Toto je pomocný nástroj. Pri nejasnostiach vždy skontroluj etiketu výrobku.</div>
     </div>
   )
-            }
+}

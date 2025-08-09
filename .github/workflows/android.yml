@@ -16,20 +16,17 @@ jobs:
       - name: Setup Node
         uses: actions/setup-node@v4
         with:
-          node-version: '18'
-          cache: 'npm'
+          node-version: '18'   # bez cache, teda netreba lockfile
 
       - name: Install deps
-        run: npm ci
+        run: npm install
 
       - name: Build web
         run: npm run build
 
-      # Pridá/synchronizuje Android platformu (dôležité je, že máme @capacitor/cli v devDeps)
       - name: Sync Capacitor (Android)
         run: npx cap sync android
 
-      # (Nepovinné) – istota, že CAMERA je v manifeste
       - name: Ensure CAMERA permission
         run: |
           MANIFEST="android/app/src/main/AndroidManifest.xml"

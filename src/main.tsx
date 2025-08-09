@@ -1,7 +1,7 @@
 import React from 'react';
 import ReactDOM from 'react-dom/client';
-import App from './App.tsx';        // <- explicitne s príponou
-import './styles.css';              // <- máš styles.css
+import App from './App';           // App.tsx je v tom istom priečinku src
+import './styles.css';            // ak máš iný názov CSS, uprav cestu
 
 ReactDOM.createRoot(document.getElementById('root') as HTMLElement).render(
   <React.StrictMode>

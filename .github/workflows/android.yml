@@ -13,10 +13,11 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      # Node bez cache (nevyžaduje lockfile)
       - name: Setup Node
         uses: actions/setup-node@v4
         with:
-          node-version: '18'   # bez cache, teda netreba lockfile
+          node-version: '18'
 
       - name: Install deps
         run: npm install
@@ -24,15 +25,30 @@ jobs:
       - name: Build web
         run: npm run build
 
+      # Pridaj Android platformu, ak ešte nie je pridaná
+      - name: Add Android platform
+        run: |
+          if [ -d "android" ]; then
+            echo "Android already added, skipping."
+          else
+            npx cap add android
+          fi
+
       - name: Sync Capacitor (Android)
         run: npx cap sync android
 
+      # Istota: povolenie KAMERY v manifeste
       - name: Ensure CAMERA permission
         run: |
           MANIFEST="android/app/src/main/AndroidManifest.xml"
-          if ! grep -q 'android.permission.CAMERA' "$MANIFEST"; then
-            sed -i 's#<manifest #<manifest xmlns:tools="http://schemas.android.com/tools" #' "$MANIFEST"
-            sed -i 's#<application#<uses-permission android:name="android.permission.CAMERA"/>\n    <application#' "$MANIFEST"
+          if [ -f "$MANIFEST" ]; then
+            if ! grep -q 'android.permission.CAMERA' "$MANIFEST"; then
+              # doplň xmlns:tools, ak chýba
+              if ! grep -q 'xmlns:tools=' "$MANIFEST"; then
+                sed -i 's#<manifest #<manifest xmlns:tools="http://schemas.android.com/tools" #' "$MANIFEST"
+              fi
+              sed -i 's#<application#<uses-permission android:name="android.permission.CAMERA"/>\n    <application#' "$MANIFEST"
+            fi
           fi
 
       - name: Setup Java
@@ -43,6 +59,10 @@ jobs:
 
       - name: Setup Android SDK
         uses: android-actions/setup-android@v3
+
+      - name: Make gradlew executable
+        working-directory: android
+        run: chmod +x ./gradlew
 
       - name: Build debug APK
         working-directory: android

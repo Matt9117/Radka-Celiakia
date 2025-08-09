@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useState } from 'react'
+import React, { useEffect, useMemo, useRef, useState } from 'react'
 import { useZxing } from 'react-zxing'
 
 type EvalStatus = 'safe' | 'avoid' | 'maybe'
@@ -8,10 +8,14 @@ export default function App() {
   const [barcode, setBarcode] = useState('')
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
+  const [camError, setCamError] = useState<string | null>(null)
   const [product, setProduct] = useState<any>(null)
   const [evaluation, setEvaluation] = useState<EvalStatus | null>(null)
   const [notes, setNotes] = useState<string[]>([])
   const [cameraId, setCameraId] = useState<string | undefined>(undefined)
+  const [hasCamPermission, setHasCamPermission] = useState<boolean | null>(null)
+  const permissionProbeRef = useRef<HTMLVideoElement | null>(null)
+
   const [history, setHistory] = useState<any[]>(() => {
     try {
       const raw = localStorage.getItem('radka_scan_history')
@@ -19,35 +23,63 @@ export default function App() {
     } catch { return [] }
   })
 
+  // preferovať zadnú kameru
+  useEffect(() => {
+    navigator.mediaDevices?.enumerateDevices?.().then((devices) => {
+      const cams = devices.filter((d) => d.kind === 'videoinput')
+      if (cams.length) {
+        const back = cams.find((c) => /back|rear|environment/i.test(c.label))
+        setCameraId(back?.deviceId || cams[0].deviceId)
+      }
+    }).catch(()=>{})
+  }, [])
+
   const constraints: MediaStreamConstraints = useMemo(() => ({
     video: cameraId ? { deviceId: { exact: cameraId } as any } : { facingMode: 'environment' }
   }), [cameraId])
 
-  const { ref } = useZxing({
+  // ZXing – dekódovanie z <video>
+  const { ref: zxingVideoRef } = useZxing({
     onDecodeResult(result) {
       const code = result.getText()
       setBarcode(code)
       setScanning(false)
       fetchProduct(code)
     },
-    timeBetweenDecodingAttempts: 300,
+    timeBetweenDecodingAttempts: 250,
     constraints
   })
 
-  useEffect(() => {
-    if (!scanning) return
-    navigator.mediaDevices?.enumerateDevices?.().then((devices) => {
-      const cams = devices.filter((d) => d.kind === 'videoinput')
-      if (cams.length && !cameraId) {
-        const back = cams.find((c) => /back|rear|environment/i.test(c.label))
-        setCameraId(back?.deviceId || cams[0].deviceId)
-      }
-    })
-  }, [scanning])
-
+  // História ukladanie
   useEffect(() => {
     localStorage.setItem('radka_scan_history', JSON.stringify(history.slice(0, 50)))
   }, [history])
+
+  // Keď používateľ zapne prepínač "Kamera", najprv explicitne vypýtaj povolenie
+  useEffect(() => {
+    if (!scanning) return
+    ;(async () => {
+      setCamError(null)
+      try {
+        const stream = await navigator.mediaDevices.getUserMedia({ video: constraints.video as MediaTrackConstraints })
+        setHasCamPermission(true)
+        // priradiť stream aj do "probe" videa, aby Android WebView zobrazil prompt korektne
+        const el = permissionProbeRef.current
+        if (el) {
+          el.srcObject = stream
+          await el.play().catch(()=>{})
+        }
+        // hneď stopnúť – zxing si otvorí vlastný stream
+        stream.getTracks().forEach(t => t.stop())
+      } catch (e: any) {
+        setHasCamPermission(false)
+        setScanning(false)
+        setCamError(e?.name === 'NotAllowedError'
+          ? 'Prístup ku kamere bol zamietnutý. Povoliť v Nastavenia > Aplikácie > Radka Scanner > Povolenia.'
+          : e?.message || 'Kameru sa nepodarilo spustiť.')
+      }
+    })()
+  }, [scanning, constraints])
 
   async function fetchProduct(code: string) {
     setLoading(true)
@@ -84,50 +116,29 @@ export default function App() {
 
   function evaluateProduct(p: any): { status: EvalStatus, notes: string[] } {
     const notes: string[] = []
-
     const allergenTags: string[] = p.allergens_tags || []
     const hasGlutenTag = allergenTags.some((t) => /(^|:)gluten$/i.test(t))
     const hasMilkTag = allergenTags.some((t) => /(^|:)milk$/i.test(t))
-
     const ingrAnalysis = p.ingredients_analysis_tags || []
     const maybeGluten = ingrAnalysis.some((t: string) => /may-contain-gluten/i.test(t))
-
     const ingredientsText = (p.ingredients_text || p.ingredients_text_en || p.ingredients_text_sk || '').toLowerCase()
     const milkTerms = ['mlieko','mliecna bielkovina','mliečna bielkovina','mlezivo','srvátka','whey','casein','kazein','kazeín','maslo','smotana','syr','tvaroh','mliečny']
     const glutenTerms = ['lepok','pšenica','psenica','wheat','jačmeň','jacmen','barley','raž','raz','rye','špalda','spelta','spelt','ovos']
     const hasMilkText = milkTerms.some((t) => ingredientsText.includes(t))
     const hasGlutenText = glutenTerms.some((t) => ingredientsText.includes(t))
-
     const claims = `${p.labels || ''} ${p.traces || ''} ${(p.traces_tags || []).join(' ')}`.toLowerCase()
     const saysGlutenFree = /gluten[- ]?free|bez lepku|bezlepkov/i.test(claims)
 
     let status: EvalStatus = 'maybe'
-    if (hasMilkTag || hasMilkText) {
-      status = 'avoid'
-      notes.push('Obsahuje mliečnu bielkovinu (napr. srvátka/kazeín).')
-    }
-    if (hasGlutenTag || hasGlutenText) {
-      status = 'avoid'
-      notes.push('Obsahuje lepok alebo obilniny s lepkovými bielkovinami.')
-    }
+    if (hasMilkTag || hasMilkText) { status = 'avoid'; notes.push('Obsahuje mliečnu bielkovinu (napr. srvátka/kazeín).') }
+    if (hasGlutenTag || hasGlutenText) { status = 'avoid'; notes.push('Obsahuje lepok alebo obilniny s lepkovými bielkovinami.') }
     if (!hasMilkTag && !hasMilkText && !hasGlutenTag && !hasGlutenText) {
-      if (saysGlutenFree && !maybeGluten) {
-        status = 'safe'
-        notes.push('Deklarované ako bezlepkové a bez mlieka v ingredienciách.')
-      } else {
-        status = 'maybe'
-        notes.push('Nenašli sa rizikové alergény, ale deklarácia nie je jasná. Skontroluj etiketu.')
-      }
+      if (saysGlutenFree && !maybeGluten) { status = 'safe'; notes.push('Deklarované ako bezlepkové a bez mlieka v ingredienciách.') }
+      else { status = 'maybe'; notes.push('Nenašli sa rizikové alergény, ale deklarácia nie je jasná. Skontroluj etiketu.') }
     }
     const tracesText = (p.traces || (p.traces_tags || []).join(', ') || '').toLowerCase()
-    if (/milk/.test(tracesText)) {
-      notes.push('Upozornenie: môže obsahovať stopy mlieka.')
-      if (status === 'safe') status = 'maybe'
-    }
-    if (/gluten|wheat|barley|rye/.test(tracesText)) {
-      notes.push('Upozornenie: môže obsahovať stopy lepku.')
-      if (status === 'safe') status = 'maybe'
-    }
+    if (/milk/.test(tracesText)) { notes.push('Upozornenie: môže obsahovať stopy mlieka.'); if (status === 'safe') status = 'maybe' }
+    if (/gluten|wheat|barley|rye/.test(tracesText)) { notes.push('Upozornenie: môže obsahovať stopy lepku.'); if (status === 'safe') status = 'maybe' }
     return { status, notes }
   }
 
@@ -139,8 +150,8 @@ export default function App() {
   }
 
   function clearHistory() {
-    setHistory([])
     localStorage.removeItem('radka_scan_history')
+    setHistory([])
   }
 
   return (
@@ -149,18 +160,29 @@ export default function App() {
         <header style={{display:'flex', justifyContent:'space-between', alignItems:'center', marginBottom:'12px'}}>
           <h1 style={{fontSize:'22px', fontWeight:600}}>Radka Scanner</h1>
           <label style={{display:'flex', alignItems:'center', gap:'8px', fontSize:'14px'}}>
-            <input type="checkbox" checked={scanning} onChange={e=>setScanning(e.target.checked)} />
+            <input
+              type="checkbox"
+              checked={scanning}
+              onChange={(e)=> setScanning(e.target.checked)}
+            />
             <span>Kamera</span>
           </label>
         </header>
 
+        {/* skryté video len na vyvolanie povolenia (nechá sa prázdne) */}
+        <video ref={permissionProbeRef} style={{display:'none'}} />
+
         <div style={{background:'#fff', border:'1px solid #e5e7eb', borderRadius:'14px', padding:'12px', marginBottom:'12px'}}>
           <div style={{fontWeight:600, marginBottom:'8px'}}>Skenovanie čiarového kódu</div>
-          {scanning && (
+
+          {camError && <div style={{padding:'10px', borderRadius:'10px', border:'1px solid #fecaca', background:'#fee2e2', color:'#991b1b', marginBottom:'8px'}}>{camError}</div>}
+
+          {scanning && hasCamPermission !== false && (
             <div style={{borderRadius:'12px', overflow:'hidden', border:'1px solid #e5e7eb', background:'#000', aspectRatio:'16/9', marginBottom:'8px'}}>
-              <video ref={ref as any} style={{width:'100%', height:'100%', objectFit:'cover'}} />
+              <video ref={zxingVideoRef as any} style={{width:'100%', height:'100%', objectFit:'cover'}} />
             </div>
           )}
+
           <div style={{display:'grid', gridTemplateColumns:'1fr auto', gap:'8px'}}>
             <input placeholder="Zadaj EAN/UPC kód" value={barcode} onChange={e=>setBarcode(e.target.value)} onKeyDown={e => { if (e.key === 'Enter' && barcode) fetchProduct(barcode) }} style={{padding:'10px', border:'1px solid #e5e7eb', borderRadius:'10px'}}/>
             <button onClick={()=>barcode && fetchProduct(barcode)} disabled={!barcode || loading} style={{padding:'10px 14px', borderRadius:'10px', border:'1px solid #e5e7eb', background: loading ? '#f3f4f6' : '#111827', color: loading ? '#111827' : '#fff'}}>
@@ -242,4 +264,4 @@ export default function App() {
       </div>
     </div>
   )
-}
+        }

@@ -13,8 +13,9 @@ export default function App() {
   // Kamera / sken
   const [scanning, setScanning] = useState(false)
   const [camError, setCamError] = useState<string | null>(null)
-  const [cameraId, setCameraId] = useState<string | undefined>(undefined)
+  const [cameraId, setCameraId] = useState<string | null>(null)
   const [torchOn, setTorchOn] = useState(false)
+  const [debugTick, setDebugTick] = useState(0) // bliká, keď beží dekódovanie
 
   // Produkt / UI
   const [barcode, setBarcode] = useState('')
@@ -32,28 +33,29 @@ export default function App() {
   const readerRef = useRef<BrowserMultiFormatReader | null>(null)
   const lastScanRef = useRef<{ code: string; at: number } | null>(null)
 
-  // preferuj zadnú kameru
+  // nájdi zadnú kameru (ak sa dá)
   useEffect(() => {
     navigator.mediaDevices?.enumerateDevices?.().then(devs => {
       const cams = devs.filter(d => d.kind === 'videoinput')
       if (cams.length) {
         const back = cams.find(c => /back|rear|environment/i.test(c.label))
-        setCameraId(back?.deviceId || cams[0].deviceId)
+        setCameraId(back?.deviceId ?? cams[0].deviceId ?? null)
       }
     }).catch(()=>{})
   }, [])
 
-  // tolerantné, ale kvalitné nastavenia videa
-  const constraints: MediaStreamConstraints = useMemo(() => ({
-    video: {
-      ...(cameraId ? { deviceId: { ideal: cameraId } as any } : {}),
-      facingMode: { ideal: 'environment' } as any,
-      width:  { ideal: 1920 },
+  // preferované constrainty
+  const constraints = useMemo(() => {
+    const base: MediaTrackConstraints = {
+      facingMode: 'environment' as any,
+      width: { ideal: 1920 },
       height: { ideal: 1080 },
-      frameRate: { ideal: 30, max: 60 } as any,
-      focusMode: 'continuous' as any
+      frameRate: { ideal: 30, max: 60 } as any
     }
-  }), [cameraId])
+    // ak máme konkrétny deviceId, skús presne ten
+    if (cameraId) (base as any).deviceId = { exact: cameraId }
+    return { video: base }
+  }, [cameraId])
 
   function stopVideoTracks() {
     const ms = videoRef.current?.srcObject as MediaStream | undefined
@@ -69,55 +71,11 @@ export default function App() {
       return
     }
 
-    ;(async () => {
-      setCamError(null)
-      try {
-        // priprav video stream (aby mal reader hotový zdroj)
-        const stream = await navigator.mediaDevices.getUserMedia({ video: constraints.video as MediaTrackConstraints })
-        if (videoRef.current) {
-          videoRef.current.srcObject = stream
-          videoRef.current.setAttribute('playsinline','')
-          videoRef.current.setAttribute('autoplay','')
-          videoRef.current.muted = true
-          try { await videoRef.current.play() } catch {}
-        }
-
-        startReader()
-      } catch (e:any) {
-        setScanning(false)
-        setCamError(e?.name === 'NotAllowedError'
-          ? 'Prístup ku kamere bol zamietnutý. Povoliť v Nastavenia > Aplikácie > Radka Scanner > Povolenia > Kamera.'
-          : e?.message || 'Kameru sa nepodarilo spustiť.')
-      }
-    })()
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [scanning, cameraId])
-
-  // pri prepnutí kamery reštartni stream aj reader
-  useEffect(() => {
-    if (!scanning) return
-    ;(async () => {
-      try {
-        readerRef.current?.reset()
-        stopVideoTracks()
-        const stream = await navigator.mediaDevices.getUserMedia({ video: constraints.video as MediaTrackConstraints })
-        if (videoRef.current) { videoRef.current.srcObject = stream; try { await videoRef.current.play() } catch {} }
-        startReader()
-      } catch (e:any) {
-        setCamError(e?.message || 'Nepodarilo sa prepnúť kameru.')
-      }
-    })()
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [cameraId])
-
-  // STABILNÝ ČÍTAČ – decodeFromVideoDevice s callbackom (bez blikania) + anti-duplicitné stráženie
-  function startReader() {
-    if (!videoRef.current) return
-
+    setCamError(null)
     const hints = new Map()
     hints.set(DecodeHintType.POSSIBLE_FORMATS, [
       BarcodeFormat.EAN_13, BarcodeFormat.EAN_8,
-      BarcodeFormat.UPC_A,  BarcodeFormat.UPC_E,
+      BarcodeFormat.UPC_A, BarcodeFormat.UPC_E,
       BarcodeFormat.CODE_128, BarcodeFormat.CODE_39,
       BarcodeFormat.ITF, BarcodeFormat.CODE_93,
       BarcodeFormat.QR_CODE
@@ -127,29 +85,47 @@ export default function App() {
     const reader = new BrowserMultiFormatReader(hints as any)
     readerRef.current = reader
 
-    reader.decodeFromVideoDevice(
-      cameraId ?? null,
+    // DÔLEŽITÉ: decodeFromConstraints – číta priebežne cez callback
+    reader.decodeFromConstraints(
+      constraints as any,
       videoRef.current!,
       (result?: Result, err?: any) => {
+        // heartbeat pre debug – uvidíš, že loop žije
+        setDebugTick(t => (t + 1) % 1000)
+
         if (result) {
           const code = result.getText()
           const now = Date.now()
+          // anti-duplicitná poistka na 2 s
           if (!lastScanRef.current || lastScanRef.current.code !== code || (now - lastScanRef.current.at) >= 2000) {
             lastScanRef.current = { code, at: now }
-            try { navigator.vibrate?.(60) } catch {}
+            try { navigator.vibrate?.(50) } catch {}
             setBarcode(code)
-            // zastavíme čítač, aby nebežal dokola – to bol ten “blikací” problém
-            reader.reset()
+            reader.reset()     // zastav čítanie
+            setScanning(false)  // UI toggne kameru dole
             fetchProduct(code)
-            setScanning(false) // UI vypne skenovanie a uvoľní kameru v effecte
           }
         } else if (err && !(err instanceof NotFoundException)) {
-          // iné chyby môžeme zobraziť raz
-          // setCamError('Chyba pri dekódovaní.')
+          // inú chybu si zapíš raz (nezahlcovať)
+          setCamError('Chyba pri dekódovaní. Skús sa priblížiť a drž kód rovno.')
+          setTimeout(() => setCamError(null), 1500)
         }
       }
-    )
-  }
+    ).catch((e: any) => {
+      setScanning(false)
+      setCamError(
+        e?.name === 'NotAllowedError'
+          ? 'Prístup ku kamere bol zamietnutý. Povoliť v Nastavenia > Aplikácie > Radka Scanner > Povolenia > Kamera.'
+          : e?.message || 'Kameru sa nepodarilo spustiť.'
+      )
+    })
+
+    return () => {
+      reader.reset()
+      stopVideoTracks()
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [scanning, constraints])
 
   // prepínanie kamery
   async function switchCamera() {
@@ -159,11 +135,11 @@ export default function App() {
       if (!cams.length) return
       const idx = cams.findIndex(c => c.deviceId === cameraId)
       const next = cams[(idx + 1) % cams.length]
-      setCameraId(next.deviceId)
+      setCameraId(next?.deviceId ?? null)
     } catch {}
   }
 
-  // torch (svetlo)
+  // svetlo (ak je podpora)
   async function toggleTorch() {
     try {
       const ms = videoRef.current?.srcObject as MediaStream | undefined
@@ -258,6 +234,7 @@ export default function App() {
       <div className="header">
         <div className="h1">Radka Scanner</div>
         <div className="actions">
+          <span className="dot" title="stav dekódera" style={{background: debugTick % 2 ? '#22c55e' : '#94a3b8'}} />
           <label className="switch">
             <input type="checkbox" checked={scanning} onChange={e=>setScanning(e.target.checked)} />
             <span>Kamera</span>
@@ -366,4 +343,4 @@ export default function App() {
       <div className="footer-note">Toto je pomocný nástroj. Pri nejasnostiach vždy skontroluj etiketu výrobku.</div>
     </div>
   )
-        }
+}

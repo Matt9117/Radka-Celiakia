@@ -5,7 +5,6 @@ import {
   BarcodeFormat,
   NotFoundException,
   Result,
-  Exception
 } from '@zxing/library'
 
 type EvalStatus = 'safe' | 'avoid' | 'maybe'
@@ -13,7 +12,6 @@ type EvalStatus = 'safe' | 'avoid' | 'maybe'
 export default function App() {
   // Kamera / sken
   const [scanning, setScanning] = useState(false)
-  const [hasCamPermission, setHasCamPermission] = useState<boolean | null>(null)
   const [camError, setCamError] = useState<string | null>(null)
   const [cameraId, setCameraId] = useState<string | undefined>(undefined)
   const [torchOn, setTorchOn] = useState(false)
@@ -31,13 +29,8 @@ export default function App() {
 
   // Refs
   const videoRef = useRef<HTMLVideoElement | null>(null)
-  const probeRef = useRef<HTMLVideoElement | null>(null)
   const readerRef = useRef<BrowserMultiFormatReader | null>(null)
   const lastScanRef = useRef<{ code: string; at: number } | null>(null)
-
-  // “pokojný” polling
-  const pollTimerRef = useRef<number | null>(null)
-  const isDecodingRef = useRef(false)
 
   // preferuj zadnú kameru
   useEffect(() => {
@@ -68,11 +61,10 @@ export default function App() {
     if (videoRef.current) videoRef.current.srcObject = null
   }
 
-  // životný cyklus kamery vs. scanning toggle
+  // spustenie / vypnutie skenovania
   useEffect(() => {
     if (!scanning) {
       readerRef.current?.reset()
-      if (pollTimerRef.current) { window.clearInterval(pollTimerRef.current); pollTimerRef.current = null }
       stopVideoTracks()
       return
     }
@@ -80,13 +72,7 @@ export default function App() {
     ;(async () => {
       setCamError(null)
       try {
-        // explicitné povolenie kvôli WebView/Capacitor autoplay
-        const test = await navigator.mediaDevices.getUserMedia({ video: constraints.video as MediaTrackConstraints })
-        setHasCamPermission(true)
-        if (probeRef.current) { probeRef.current.srcObject = test; try { await probeRef.current.play() } catch {} }
-        test.getTracks().forEach(t => t.stop())
-
-        // reálny stream
+        // priprav video stream (aby mal reader hotový zdroj)
         const stream = await navigator.mediaDevices.getUserMedia({ video: constraints.video as MediaTrackConstraints })
         if (videoRef.current) {
           videoRef.current.srcObject = stream
@@ -98,7 +84,6 @@ export default function App() {
 
         startReader()
       } catch (e:any) {
-        setHasCamPermission(false)
         setScanning(false)
         setCamError(e?.name === 'NotAllowedError'
           ? 'Prístup ku kamere bol zamietnutý. Povoliť v Nastavenia > Aplikácie > Radka Scanner > Povolenia > Kamera.'
@@ -114,7 +99,6 @@ export default function App() {
     ;(async () => {
       try {
         readerRef.current?.reset()
-        if (pollTimerRef.current) { window.clearInterval(pollTimerRef.current); pollTimerRef.current = null }
         stopVideoTracks()
         const stream = await navigator.mediaDevices.getUserMedia({ video: constraints.video as MediaTrackConstraints })
         if (videoRef.current) { videoRef.current.srcObject = stream; try { await videoRef.current.play() } catch {} }
@@ -126,7 +110,7 @@ export default function App() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [cameraId])
 
-  // “pokojné” dekódovanie bez blikania – fixne v intervale
+  // STABILNÝ ČÍTAČ – decodeFromVideoDevice s callbackom (bez blikania) + anti-duplicitné stráženie
   function startReader() {
     if (!videoRef.current) return
 
@@ -143,34 +127,28 @@ export default function App() {
     const reader = new BrowserMultiFormatReader(hints as any)
     readerRef.current = reader
 
-    if (pollTimerRef.current) window.clearInterval(pollTimerRef.current)
-    pollTimerRef.current = window.setInterval(async () => {
-      if (!scanning || !videoRef.current || isDecodingRef.current) return
-      isDecodingRef.current = true
-      try {
-        // jednorazová detekcia z aktuálneho frame-u
-        const res: Result | null = await reader.decodeFromVideoElement(videoRef.current).catch((err: Exception) => {
-          if (err instanceof NotFoundException) return null
-          return null // iné chyby ignorujeme v tomto ticku
-        }) as Result | null
-
-        if (res) handleResult(res)
-      } finally {
-        isDecodingRef.current = false
+    reader.decodeFromVideoDevice(
+      cameraId ?? undefined,
+      videoRef.current!,
+      (result?: Result, err?: any) => {
+        if (result) {
+          const code = result.getText()
+          const now = Date.now()
+          if (!lastScanRef.current || lastScanRef.current.code !== code || (now - lastScanRef.current.at) >= 2000) {
+            lastScanRef.current = { code, at: now }
+            try { navigator.vibrate?.(60) } catch {}
+            setBarcode(code)
+            // zastavíme čítač, aby nebežal dokola – to bol ten “blikací” problém
+            reader.reset()
+            fetchProduct(code)
+            setScanning(false) // UI vypne skenovanie a uvoľní kameru v effecte
+          }
+        } else if (err && !(err instanceof NotFoundException)) {
+          // iné chyby môžeme zobraziť raz
+          // setCamError('Chyba pri dekódovaní.')
+        }
       }
-    }, 450) as unknown as number
-  }
-
-  function handleResult(res: Result) {
-    const code = res.getText()
-    const now = Date.now()
-    // anti-duplicitné čítanie do 2 s
-    if (lastScanRef.current && lastScanRef.current.code === code && (now - lastScanRef.current.at) < 2000) return
-    lastScanRef.current = { code, at: now }
-    try { navigator.vibrate?.(60) } catch {}
-    setBarcode(code)
-    setScanning(false) // vypneme scanning; cleanup v effecte zastaví video a timer
-    fetchProduct(code)
+    )
   }
 
   // prepínanie kamery
@@ -291,9 +269,6 @@ export default function App() {
 
       {camError && <div className="card alert-bad">{camError}</div>}
 
-      {/* skrytý “prebudzovací” video element pre autoplay/povolenia */}
-      <video ref={probeRef} playsInline autoPlay muted style={{display:'none'}} />
-
       {scanning && (
         <div className="card">
           <div className="video-wrap">
@@ -391,4 +366,4 @@ export default function App() {
       <div className="footer-note">Toto je pomocný nástroj. Pri nejasnostiach vždy skontroluj etiketu výrobku.</div>
     </div>
   )
-}
+        }

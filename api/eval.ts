@@ -1,138 +1,140 @@
-// api/eval.ts
-import type { VercelRequest, VercelResponse } from '@vercel/node'
-
+// CommonJS verzia /api/eval – funguje bez "type":"module"
 const ALLOW_ORIGINS = [
   'capacitor://localhost',
   'http://localhost',
   'http://127.0.0.1',
   'https://radka-celiakia.vercel.app',
-]
+];
 
-function setCors(req: VercelRequest, res: VercelResponse) {
-  const origin = String(req.headers.origin || '')
-  const allowed = ALLOW_ORIGINS.find(o => origin.startsWith(o))
-  res.setHeader('Access-Control-Allow-Origin', allowed || '*')
-  res.setHeader('Access-Control-Allow-Methods', 'POST, OPTIONS, GET')
-  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization')
-  res.setHeader('Access-Control-Max-Age', '86400')
+function setCors(req, res) {
+  const origin = String(req.headers.origin || '');
+  const allowed = ALLOW_ORIGINS.find(o => origin.startsWith(o));
+  res.setHeader('Access-Control-Allow-Origin', allowed || '*');
+  res.setHeader('Access-Control-Allow-Methods', 'POST, GET, OPTIONS');
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization');
+  res.setHeader('Access-Control-Max-Age', '86400');
 }
 
-// bezpečné načítanie JSON tela aj keď príde zlý Content-Type
-async function readJsonBody(req: VercelRequest) {
+async function readJson(req) {
   try {
-    if ((req as any).body && typeof (req as any).body === 'object') {
-      return (req as any).body
-    }
-    const chunks: Uint8Array[] = []
-    for await (const ch of req) chunks.push(ch as Uint8Array)
-    const raw = Buffer.concat(chunks).toString('utf8')
-    if (!raw) return {}
-    return JSON.parse(raw)
-  } catch (e) {
-    console.error('Body parse error:', e)
-    return {}
+    if (req.body && typeof req.body === 'object') return req.body;
+    const chunks = [];
+    for await (const ch of req) chunks.push(ch);
+    const raw = Buffer.concat(chunks).toString('utf8');
+    return raw ? JSON.parse(raw) : {};
+  } catch {
+    return {};
   }
 }
 
-export default async function handler(req: VercelRequest, res: VercelResponse) {
-  setCors(req, res)
+/** @type {(req: import('@vercel/node').VercelRequest, res: import('@vercel/node').VercelResponse) => Promise<void>} */
+module.exports = async function handler(req, res) {
+  setCors(req, res);
 
-  if (req.method === 'OPTIONS') return res.status(200).end()
+  if (req.method === 'OPTIONS') {
+    res.status(200).end();
+    return;
+  }
 
-  // Health-check v prehliadači
   if (req.method === 'GET') {
-    const key = process.env.OPENAI_API_KEY
-    // akceptujeme aj sk-proj-*
-    const hasKey = !!(key && key.startsWith('sk'))
-    return res.status(200).json({
-      ok: true,
-      message: 'Eval endpoint OK. Use POST with JSON.',
-      openai_key_present: hasKey
-    })
+    res.status(200).json({ ok: true, msg: 'eval ready', hasKey: !!process.env.OPENAI_API_KEY });
+    return;
   }
 
   if (req.method !== 'POST') {
-    return res.status(405).json({ error: 'Only POST is allowed' })
+    res.status(405).json({ error: 'Only POST allowed' });
+    return;
+  }
+
+  const body = await readJson(req); // { code, name, ingredients, allergens, lang }
+  const apiKey = process.env.OPENAI_API_KEY;
+
+  // Ak chýba kľúč, vráť echo, nech appka má odpoveď (nepadne 500).
+  if (!apiKey) {
+    res.status(200).json({
+      ok: true,
+      ai: null,
+      status: 'maybe',
+      notes: ['AI nie je zapnuté (chýba OPENAI_API_KEY).'],
+      echo: body,
+    });
+    return;
   }
 
   try {
-    const body = await readJsonBody(req)
-    const { code, name, ingredients, allergens, lang } = body || {}
+    // Postav krátky prompt
+    const user = {
+      code: body.code || '',
+      name: body.name || '',
+      ingredients: body.ingredients || '',
+      allergens: body.allergens || '',
+      lang: body.lang || 'sk',
+    };
 
-    console.log('AI req:', {
-      code, name,
-      hasIngredients: Boolean(ingredients),
-      hasAllergens: Boolean(allergens),
-      lang
-    })
+    const systemMsg =
+      'Si asistent pre celiakiu a alergiu na mliečnu bielkovinu. ' +
+      'Z dostupných údajov rozhodni: "safe" (bezpečné), "avoid" (vyhnúť sa) alebo "maybe" (neisté). ' +
+      'Vysvetli stručne prečo. Ak sú stopy mlieka/gluténu, skôr "maybe". Odpovedz v jednom jazyku podľa "lang".';
 
-    if (!code) {
-      return res.status(400).json({ error: 'Missing code' })
-    }
-
-    const apiKey = process.env.OPENAI_API_KEY
-    if (!apiKey) {
-      console.error('OPENAI_API_KEY missing!')
-      return res.status(500).json({ error: 'Missing OPENAI_API_KEY' })
-    }
-
-    // Prompt – žiadame čistý JSON v presnom tvare
-    const system = `Si asistent pre hodnotenie potravín pre celiakiu a alergiu na mliečnu bielkovinu.
-Vráť presne 1 JSON objekt v tvare:
-{"status":"safe|avoid|maybe","title":"krátke odôvodnenie","notes":["..."]}.
-Bez komentárov, bez formátovania navyše.`
-
-    const user = `EAN: ${code}
-Názov: ${name || '-'}
-Alergény: ${allergens || '-'}
-Ingrediencie: ${ingredients || '-'}
-Jazyk: ${lang || 'sk'}`
-
-    // Chat Completions – stabilné a nevyžaduje beta headre
-    const resp = await fetch('https://api.openai.com/v1/chat/completions', {
+    // Volanie OpenAI (chat completions) – Node 18 má global fetch
+    const r = await fetch('https://api.openai.com/v1/chat/completions', {
       method: 'POST',
       headers: {
-        'Authorization': `Bearer ${apiKey}`,
-        'Content-Type': 'application/json'
+        Authorization: `Bearer ${apiKey}`,
+        'Content-Type': 'application/json',
       },
       body: JSON.stringify({
         model: 'gpt-4o-mini',
-        response_format: { type: 'json_object' }, // vynúti validný JSON
-        messages: [
-          { role: 'system', content: system },
-          { role: 'user', content: user }
-        ],
         temperature: 0.2,
-        max_tokens: 250
-      })
-    })
+        messages: [
+          { role: 'system', content: systemMsg },
+          {
+            role: 'user',
+            content:
+              `lang=${user.lang}\n` +
+              `name=${user.name}\n` +
+              `code=${user.code}\n` +
+              `allergens=${user.allergens}\n` +
+              `ingredients=${user.ingredients}\n` +
+              'Vráť JSON: {"status":"safe|avoid|maybe","notes":["...","..."]}',
+          },
+        ],
+      }),
+    });
 
-    if (!resp.ok) {
-      const text = await resp.text()
-      console.error('OpenAI upstream error:', resp.status, text)
-      return res.status(502).json({ error: 'OpenAI upstream error', status: resp.status, details: text })
+    if (!r.ok) {
+      const txt = await r.text().catch(() => '');
+      throw new Error(`OpenAI HTTP ${r.status}: ${txt}`);
     }
 
-    const data: any = await resp.json()
-    const text = data?.choices?.[0]?.message?.content || ''
-    console.log('AI raw:', text)
+    const data = await r.json();
+    const text = data?.choices?.[0]?.message?.content || '';
 
-    // content je už JSON string (response_format=json_object)
-    let parsed: any = null
-    try { parsed = JSON.parse(text) } catch (e) { /* fallback nižšie */ }
-
-    if (!parsed || !parsed.status) {
-      return res.status(200).json({
-        status: 'maybe',
-        title: 'Neisté',
-        notes: ['AI nevrátila očakávaný JSON.'],
-        raw: text
-      })
+    // Skús parsovať JSON z odpovede
+    let parsed = null;
+    try {
+      parsed = JSON.parse(text);
+    } catch {
+      // ak to nie je čistý JSON, skús vytiahnuť {...}
+      const m = text.match(/\{[\s\S]*\}/);
+      if (m) {
+        try { parsed = JSON.parse(m[0]); } catch {}
+      }
     }
 
-    return res.status(200).json(parsed)
-  } catch (e: any) {
-    console.error('Handler fatal error:', e?.stack || e?.message || e)
-    return res.status(500).json({ error: 'Server error', details: e?.message || String(e) })
+    const status = (parsed && parsed.status) || 'maybe';
+    const notes = (parsed && Array.isArray(parsed.notes) && parsed.notes) || [text.trim() || 'Bez detailov'];
+
+    res.status(200).json({
+      ok: true,
+      status,  // "safe" | "avoid" | "maybe"
+      notes,
+    });
+  } catch (err) {
+    res.status(200).json({
+      ok: true,
+      status: 'maybe',
+      notes: ['AI požiadavka zlyhala.', String(err?.message || err)],
+    });
   }
-}
+};

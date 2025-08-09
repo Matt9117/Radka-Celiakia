@@ -5,7 +5,7 @@ import { DecodeHintType, BarcodeFormat, Result } from '@zxing/library'
 type EvalStatus = 'safe' | 'avoid' | 'maybe'
 
 export default function App() {
-  // Kamera
+  // kamera
   const videoRef = useRef<HTMLVideoElement | null>(null)
   const readerRef = useRef<BrowserMultiFormatReader | null>(null)
   const [scanning, setScanning] = useState(false)
@@ -14,7 +14,7 @@ export default function App() {
   const [torchOn, setTorchOn] = useState(false)
   const lastScanRef = useRef<{ code: string; at: number } | null>(null)
 
-  // Produkt / UI
+  // produkt / UI
   const [barcode, setBarcode] = useState('')
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
@@ -25,7 +25,7 @@ export default function App() {
     try { return JSON.parse(localStorage.getItem('radka_scan_history') || '[]') } catch { return [] }
   })
 
-  // nájdi zadnú kameru
+  // zvoliť zadnú kameru
   useEffect(() => {
     navigator.mediaDevices?.enumerateDevices?.().then(devs => {
       const cams = devs.filter(d => d.kind === 'videoinput')
@@ -36,19 +36,16 @@ export default function App() {
     }).catch(()=>{})
   }, [])
 
+  // zastavenie videostreamu = ukončenie skenu
   function stopStream() {
     const ms = videoRef.current?.srcObject as MediaStream | undefined
     ms?.getTracks().forEach(t => t.stop())
     if (videoRef.current) videoRef.current.srcObject = null
-    try { readerRef.current?.stopContinuousDecode() } catch {}
   }
 
   // spustenie / vypnutie skenovania
   useEffect(() => {
-    if (!scanning) {
-      stopStream()
-      return
-    }
+    if (!scanning) { stopStream(); return }
 
     setCamError(null)
 
@@ -65,20 +62,18 @@ export default function App() {
     const reader = new BrowserMultiFormatReader(hints as any)
     readerRef.current = reader
 
-    // kontinuálne dekódovanie – zastavíme ho hneď po prvom úspechu
     reader.decodeFromVideoDevice(
-      cameraId,                // string | undefined – OK pre @zxing/browser
+      cameraId,               // undefined = default kamera, alebo konkrétne deviceId
       videoRef.current!,
-      (res?: Result, _err?: unknown) => {
+      (res?: Result) => {
         if (!res) return
         const code = res.getText()
         const now = Date.now()
-        // anti-duplicitná poistka 2 s
         if (!lastScanRef.current || lastScanRef.current.code !== code || (now - lastScanRef.current.at) >= 2000) {
           lastScanRef.current = { code, at: now }
           try { navigator.vibrate?.(50) } catch {}
           setBarcode(code)
-          setScanning(false)   // týmto spustíme cleanup v useEffect vyššie
+          setScanning(false)   // vypne sken -> stopStream() vráti kameru
           fetchProduct(code)
         }
       }
@@ -104,10 +99,11 @@ export default function App() {
       const idx = cams.findIndex(c => c.deviceId === cameraId)
       const next = cams[(idx + 1) % cams.length]
       setCameraId(next.deviceId)
+      // keď je scanning true, useEffect sa reštartne s novou kamerou
     } catch {}
   }
 
-  // svetlo (torch)
+  // svetlo (torch) – len ak to kamera podporuje
   async function toggleTorch() {
     try {
       const ms = videoRef.current?.srcObject as MediaStream | undefined
@@ -311,4 +307,4 @@ export default function App() {
       <div className="footer-note">Toto je pomocný nástroj. Pri nejasnostiach vždy skontroluj etiketu výrobku.</div>
     </div>
   )
-    }
+      }

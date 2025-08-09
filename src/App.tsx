@@ -128,7 +128,7 @@ export default function App() {
     readerRef.current = reader
 
     reader.decodeFromVideoDevice(
-      cameraId ?? undefined,
+      cameraId ?? null,
       videoRef.current!,
       (result?: Result, err?: any) => {
         if (result) {

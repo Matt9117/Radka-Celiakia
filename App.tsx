@@ -1,4 +1,3 @@
-
 import React, { useEffect, useMemo, useState } from 'react'
 import { useZxing } from 'react-zxing'
 
@@ -75,7 +74,7 @@ export default function App() {
         name: p.product_name || p.generic_name || 'Neznámy produkt',
         status: evalResult.status,
         ts: Date.now(),
-      }, *h.filter((x: any) => x.code !== code)].slice(0, 50))
+      }, ...h.filter((x: any) => x.code !== code)].slice(0, 50))
     } catch (e: any) {
       setError(e?.message || 'Neznáma chyba')
     } finally {
